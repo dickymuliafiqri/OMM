@@ -1,5 +1,5 @@
 # Multi-stage build
-FROM golang:1.24-bookworm AS builder
+FROM golang:1.25-bookworm AS builder
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -27,5 +27,5 @@ COPY --from=builder /app/omm-bench .
 RUN useradd -m -s /bin/bash ommuser
 USER ommuser
 
-EXPOSE 9090
+EXPOSE 8080
 CMD ["./omm-bench"]
