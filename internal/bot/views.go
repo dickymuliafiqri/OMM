@@ -121,7 +121,7 @@ func FormatSWEScoreCard(run *storage.BenchmarkRun, taskRuns []storage.SWETaskRun
 	gradeDesc := swe.FormatGradeDescription(grade)
 
 	var sb strings.Builder
-	sb.WriteString("📊 <b>HASIL EVALUASI</b> 📊\n")
+	sb.WriteString("📊 <b>ON MY MARK SWE-BENCH</b> 📊\n")
 	sb.WriteString("━━━━━━━━━━━━\n")
 
 	sb.WriteString("<blockquote>")

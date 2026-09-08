@@ -8,13 +8,11 @@ import (
 	"syscall"
 	"time"
 
-	"benchmark/internal/benchmark"
 	"benchmark/internal/bot"
 	"benchmark/internal/config"
 	"benchmark/internal/health"
 	"benchmark/internal/pricing"
 	"benchmark/internal/queue"
-	"benchmark/internal/sandbox"
 	"benchmark/internal/storage"
 	"benchmark/pkg/logger"
 )
@@ -48,14 +46,11 @@ func main() {
 	}
 	logger.Sys("BOOT", "Basis data Turso/LibSQL berhasil dihubungkan dan dimigrasi")
 
-	// 3. Initialize Sandbox & Benchmark Engine (use AST_STRICT_MODE from configuration)
-	runner := sandbox.NewRunner(cfg.ASTStrictMode)
-	engine := benchmark.NewEngine()
-
-	// 4. Initialize worker pool
-	pool := queue.NewWorkerPool(cfg.MaxWorkers, cfg.MaxQueueSize, runner, engine, repo)
+	// 3. Initialize worker pool
+	pool := queue.NewWorkerPool(cfg.MaxWorkers, cfg.MaxQueueSize, repo)
+	pool.SetSWETaskTimeout(time.Duration(cfg.SWETaskTimeoutMinutes) * time.Minute)
 	pool.Start()
-	logger.Sys("BOOT", "Worker Pool aktif (workers=%d queue_capacity=%d)", cfg.MaxWorkers, cfg.MaxQueueSize)
+	logger.Sys("BOOT", "Worker Pool aktif (workers=%d queue_capacity=%d stage_timeout=%dm)", cfg.MaxWorkers, cfg.MaxQueueSize, cfg.SWETaskTimeoutMinutes)
 
 	// Periodically sync token pricing (OpenRouter API) asynchronously in background and persist to Turso database
 	go pricing.StartPeriodicSync(ctx, repo, 12*time.Hour)
