@@ -1,10 +1,10 @@
-# 🚀 OMM (On My Mark) — Native Go SWE-bench Concurrency Ladder
+# 🚀 OMM (On My Mark) — Native Go SWE-bench Concurrency Ladder API Server
 
 **OMM (On My Mark)** adalah platform benchmarking dan evaluasi otomatis berkecepatan tinggi yang dirancang khusus untuk menguji kecakapan model AI (*Large Language Models*) dalam mendiagnosis, mengisolasi akar masalah, dan memperbaiki kode backend **Go 1.24+** nyata (*brownfield bug-fixing / Go SWE-bench*).
 
 Berbeda dari benchmark konvensional yang meminta AI membuat kode dari nol (*greenfield boilerplate*), OMM menyajikan **laporan bug riil (*GitHub Issue*)** dan basis kode Go yang bermasalah (*broken codebase*). Model AI dievaluasi melalui **4-Tier Engineering Ladder** (Junior, Mid-Level, Senior, Staff) menggunakan Go toolchain bawaan (`go test -race`) secara 100% native dan bebas dari ketergantungan Docker.
 
-Diakses secara interaktif melalui **Telegram Bot** maupun **CLI Tool**, OMM mengevaluasi kode yang dihasilkan AI secara mekanis di dalam sandbox terisolasi dengan prinsip deterministik **Fail-to-Pass (F2P)**.
+OMM berfungsi sebagai **stateless HTTP API benchmark server** (`omm-bench`) murni yang menerima permintaan evaluasi dari dashboard web (`omm-web`) dan mengirimkan pembaruan progres serta hasil akhir via HTTP callback.
 
 ---
 
@@ -16,12 +16,11 @@ Diakses secara interaktif melalui **Telegram Bot** maupun **CLI Tool**, OMM meng
 - [Fitur Utama](#-fitur-utama)
 - [Struktur Proyek](#-struktur-proyek)
 - [Persyaratan Sistem](#-persyaratan-sistem)
-- [Panduan Instalasi & Menjalankan Lokal](#-panduan-instalasi--menjalankan-lokal)
-- [Penggunaan Mandiri (CLI Mode)](#-penggunaan-mandiri-cli-mode)
-- [Deployment via Docker & VPS](#-deployment-via-docker--vps)
+- [Dokumentasi HTTP API Server](#-dokumentasi-http-api-server)
+- [Protokol HTTP Callback](#-protokol-http-callback)
+- [Panduan Deployment & Kontainerisasi](#-panduan-deployment--kontainerisasi)
+- [Verifikasi & Pengujian](#-verifikasi--pengujian)
 - [Konfigurasi Lingkungan (.env)](#-konfigurasi-lingkungan-env)
-- [Daftar Perintah Telegram Bot](#-daftar-perintah-telegram-bot)
-- [Observability & Health Check](#-observability--health-check)
 - [Lisensi](#-lisensi)
 
 ---
@@ -30,33 +29,27 @@ Diakses secara interaktif melalui **Telegram Bot** maupun **CLI Tool**, OMM meng
 
 ```mermaid
 flowchart TD
-    User([Pengguna Telegram / CLI]) <-->|Chat & Inline Buttons / CLI Flag| BotAPI[Telegram Bot API / CLI Engine]
-    BotAPI <--> BotRouter[Bot Router & FSM Wizard]
-
-    subgraph Core ["Core SWE-bench Pipeline"]
-        BotRouter --> AccessGuard[Middleware: Whitelist & Rate Limit]
-        AccessGuard --> WorkerPool[Worker Pool & Backpressure Queue]
+    Web[omm-web Dashboard / Client] <-->|POST /api/bench\nHMAC Auth| API[omm-bench HTTP API Server]
+    
+    subgraph Server ["omm-bench Architecture (Stateless)"]
+        API --> Guard[Security Middleware: HMAC, SSRF Guard, Rate Limiter, CORS]
+        Guard --> WorkerPool[Worker Pool & Concurrency Limiter]
         WorkerPool --> AIClient[AI Provider Client]
-        AIClient <-->|Multi-turn /chat/completions| LLM[AI Provider\nOpenAI / OpenRouter / Groq / DeepSeek / Ollama]
+        AIClient <-->|Multi-turn Chat API| LLM[AI Provider\nOpenAI / OpenRouter / Groq / Ollama]
 
         AIClient --> Extractor[SWE Code Extractor & Validator]
         
-        subgraph FeedbackLoop ["Self-Healing SWE Loop (Max 3 Turns)"]
-            Extractor --> Evaluator[Ephemeral SWE Sandbox\ngo test -race -v]
-            Evaluator -->|Test Failure / Race / Panic| AICorrection[Feedback Test Stderr & Trace ke AI]
+        subgraph FeedbackLoop ["Self-Healing SWE Loop (Max 2 Turns)"]
+            Extractor --> Evaluator[Ephemeral SWE Sandbox\ngo test -race -v -count=1]
+            Evaluator -->|Test Failure / Race| AICorrection[Feedback Test Stderr ke AI]
             AICorrection --> AIClient
-            Evaluator -->|All Tests Pass 0 Race| PassResult[Ladder Score Calculation]
+            Evaluator -->|Pass & Zero Race| PassResult[Ladder Score Calculation]
         end
 
-        PassResult --> Engine[Ladder Aggregator & Tier Assessor]
+        PassResult --> CallbackClient[HTTP Callback Client]
     end
 
-    subgraph Storage ["Persistence & Analytics"]
-        WorkerPool --> Turso[(Turso LibSQL Database)]
-        BotRouter <--> Turso
-        OpenRouterPricing[OpenRouter Pricing Sync] -.->|Sinkronisasi Tarif Token| Turso
-        HealthServer[HTTP Observability :8080\n/ /healthz /readyz /stats] <--> Turso
-    end
+    CallbackClient -->|POST callbackUrl\nProgress, Log & Result Events| Web
 ```
 
 ---
@@ -67,8 +60,8 @@ Tolok ukur utama OMM adalah menguji **daya nalar sistem (*systems reasoning*)** 
 
 * **Brownfield Bug-Fixing:** Model AI tidak lagi diminta membuat server dari nol yang rentan dihafal dari data pelatihan (*pretraining contamination*). Sebaliknya, model diberikan issue description, konteks arsitektur, dan file kode yang rusak. Model harus mengisolasi bug tanpa merusak fungsionalitas lain.
 * **Prinsip Fail-to-Pass (F2P) Deterministik:** Setiap task memiliki test suite yang ketat. Kode awal (`BrokenCode`) **dijamin gagal**, sedangkan solusi perbaikan (`ReferenceSolution`) **dijamin lolos 100%** tanpa data race.
-* **100% Native Go (Zero Docker Overhead):** Pengujian berjalan langsung di sandbox ephemeral menggunakan `go test -race -v -count=1`. Tidak memerlukan daemon Docker atau runtime container yang berat, sehingga benchmark berjalan cepat (< 3-5 detik per task).
-* **Multi-Difficulty Differentiation:** Membedakan secara tegas kapabilitas model kecil (8B–31B) dengan model penalaran *flagship* (o3-mini, Claude 3.7 Sonnet, GPT-4o, DeepSeek-R1).
+* **100% Native Go (Zero Docker Overhead):** Pengujian berjalan langsung di sandbox ephemeral menggunakan `go test -race -v -count=1`. Tidak memerlukan daemon Docker atau container runtime yang berat, sehingga benchmark berjalan cepat (< 3-5 detik per task).
+* **Multi-Difficulty Differentiation:** Membedakan secara tegas kapabilitas model kecil (8B–31B) dengan model penalaran *flagship* (Claude 3.7 Sonnet, GPT-4o, DeepSeek-R1).
 
 ---
 
@@ -98,13 +91,13 @@ Tolok ukur utama OMM adalah menguji **daya nalar sistem (*systems reasoning*)** 
 
 ## 🔄 Self-Healing Test Feedback Loop
 
-Jika kode perbaikan yang dihasilkan model AI gagal saat dijalankan terhadap test suite, OMM tidak langsung menggugurkan pengujian. Sistem menerapkan mekanisme **Self-Healing Feedback Loop**:
+Jika kode perbaikan yang dihasilkan model AI gagal saat dijalankan terhadap test suite, OMM tidak langsung menggugurkan pengujian:
 
 1. **Ekstraksi Kode Go:** Mengambil blok kode lengkap ` ```go ... ``` ` yang dihasilkan AI.
 2. **Audit Keamanan AST Statis:** Memastikan kode tidak mengimpor paket berbahaya (`os/exec`, `syscall`, `unsafe`, dll.).
-3. **Uji Live dengan Race Detector:** Menjalankan `go test -race -v -count=1` di direktori sementara unik (`omm-swe-*`).
-4. **Koreksi Multi-turn:** Jika pengujian gagal (test failure, panic, timeout, atau `DATA RACE`), output log dan stack trace dikirim kembali ke AI dalam konteks percakapan multi-turn.
-5. **Akumulasi Token & Biaya:** Token masukan (*prompt*) dan keluaran (*completion*) diakumulasikan dari seluruh putaran percakapan untuk memastikan kalkulasi biaya akurat.
+3. **Uji Live dengan Race Detector:** Menjalankan `go test -race -v -count=1` di direktori sementara unik (`omm-sandbox-*`).
+4. **Koreksi Multi-turn:** Jika pengujian gagal (test failure, panic, timeout, atau `DATA RACE`), output log dan stack trace dikirim kembali ke AI dalam konteks percakapan multi-turn (maksimal 1 kali umpan balik).
+5. **Akumulasi Token & Biaya:** Token masukan (*prompt*) dan keluaran (*completion*) diakumulasikan dari seluruh putaran percakapan.
 
 ---
 
@@ -113,22 +106,9 @@ Jika kode perbaikan yang dihasilkan model AI gagal saat dijalankan terhadap test
 - 🧩 **Brownfield SWE-bench Tasks**: Berisi 8 kasus bug konkurensi dunia nyata yang terkurasi ketat dengan prinsip Fail-to-Pass (F2P).
 - 🪜 **4-Tier Engineering Ladder**: Evaluasi berjenjang dari Junior (20 pts), Mid-Level (25 pts), Senior (30 pts), hingga Staff Engineer (25 pts).
 - 🔄 **Self-Healing Test Loop**: Memberikan feedback kompilasi dan race detector ke AI maksimal 1 kali umpan balik (maksimal 2 percobaan) dengan penalti bertingkat (1.0 / 0.8 / gagal = 0).
-- 🏆 **Leaderboard Berdasarkan Skor Tertinggi**: Model diperingkat berdasarkan skor puncaknya (*peak performance*) dan tier tertinggi yang berhasil diselesaikan (*Max Tier*).
-- 💵 **Estimasi Biaya Riil & Sinkronisasi Tarif**:
-  - Mengakumulasikan token input dan output di seluruh putaran self-healing.
-  - Sinkronisasi berkala tarif harga token resmi dari API OpenRouter ke database Turso.
-- 🔑 **Manajemen Kredensial Mandiri**:
-  - Kredensial pengguna (`Base URL` dan `API Key`) disimpan aman di database Turso untuk kemudahan benchmark berulang.
-  - Fitur penghapusan kredensial instan kapan saja via `/resetkey` atau tombol inline keyboard.
-  - Pesan teks berisi API Key langsung dihapus otomatis dari chat history Telegram demi keamanan visual.
-- 🤖 **Dynamic Model Picker & Ping Test**:
-  - Pengambilan otomatis daftar model dari endpoint `GET /models` penyedia AI.
-  - Paginasi interaktif inline keyboard (`⬅️ Prev`, `📄 X/Y`, `➡️ Next`).
-  - Validasi *Ping Test* sebelum memulai benchmark untuk memastikan endpoint dan kredensial aktif.
 - 🛡️ **AST Security Guard**: Pemindaian pohon sintaksis statis sebelum kompilasi untuk memblokir paket berbahaya (`os/exec`, `syscall`, `unsafe`, `plugin`, `runtime/cgo`, `C`).
 - ⚡ **Zero-Docker Ephemeral Sandbox**: Pengujian dijalankan langsung melalui subproses native Go dengan isolasi direktori sementara dan timeout ketat.
-- 🚦 **Worker Pool & Backpressure Queue**: Eksekusi pengujian dibatasi oleh antrean terkontrol dengan *progress throttling* (1.5 detik) agar tidak memicu rate limit pesan Telegram (HTTP 429).
-- 📥 **Ekspor Laporan & Scorecard**: Pengguna menerima kartu skor visual Telegram lengkap dengan status kelulusan tiap tier dan task.
+- 🔒 **High Security Posture**: Autentikasi HMAC shared secret, proteksi SSRF terhadap callback dan base URL, token bucket rate limiter, dan zero-persistence API keys.
 
 ---
 
@@ -137,45 +117,67 @@ Jika kode perbaikan yang dihasilkan model AI gagal saat dijalankan terhadap test
 ```text
 OMM/
 ├── cmd/
-│   ├── bot/
-│   │   └── main.go                 # Entrypoint bot Telegram & server observabilitas
-│   └── cli/
-│       └── main.go                 # Tool CLI SWE-bench & verifikasi F2P lokal
+│   └── bench/                      # Entrypoint: HTTP API benchmark server
+│       └── main.go
 ├── internal/
 │   ├── ai/                         # Klien AI, prompt problem-driven, multi-turn loop
 │   │   ├── client.go               # Universal OpenAI/OpenRouter client & multi-turn Chat API
 │   │   ├── extractor.go            # Pembersih markdown & ekstraktor kode Go
 │   │   └── prompt.go               # Prompt standar evaluasi
+│   ├── config/                     # Config parser server minimalis
+│   │   └── config.go               # Parser konfigurasi env vars
+│   ├── metrics/                    # Metrik performa in-memory
+│   │   └── metrics.go              # Counter, Gauge, Timer metrics collector
+│   ├── server/                     # HTTP router, handlers, middleware security
+│   │   ├── router.go               # HTTP routing multiplexer (net/http standar)
+│   │   ├── handler_bench.go        # POST /api/bench handler
+│   │   ├── handler_health.go       # GET /healthz, /readyz handler
+│   │   ├── handler_root.go         # GET / root landing handler
+│   │   ├── handler_status.go       # GET /api/bench/status handler
+│   │   ├── middleware_auth.go      # Autentikasi HMAC shared secret
+│   │   ├── middleware_cors.go      # CORS whitelist handler
+│   │   ├── middleware_logging.go   # Structured request logging middleware
+│   │   ├── middleware_ratelimit.go # Token bucket rate limiter
+│   │   ├── middleware_security.go  # Security headers (nosniff, no-cache, DENY)
+│   │   ├── middleware_validate.go  # Request validation & 1MB body limit
+│   │   └── ssrf.go                 # SSRF protection validator
+│   ├── worker/                     # Worker pool, ladder runner, callback client
+│   │   ├── pool.go                 # Semaphore-based worker pool & graceful shutdown
+│   │   ├── job.go                  # Definisi data model pekerjaan benchmark
+│   │   ├── executor.go             # Orkestrasi siklus hidup evaluasi
+│   │   ├── ladder.go               # 4-tier ladder runner & self-healing loop
+│   │   ├── callback.go             # HTTP callback client dengan exponential retry
+│   │   └── cost.go                 # Estimasi biaya token fallback
 │   ├── swe/                        # Mesin evaluasi SWE-bench & ladder
 │   │   ├── task.go                 # Definisi Task, Tier, EvalResult, LadderReport
 │   │   ├── registry.go             # Registry task kurasi & fungsi default ladder
 │   │   ├── evaluator.go            # Ephemeral test runner (go test -race) & F2P validator
 │   │   ├── prompt.go               # Prompt builder (Issue Markdown + Broken Code) & extractor
-│   │   └── tasks/                  # Kasus uji bug riil terkurasi
-│   │       ├── t1_nil_pointer.go   # Tier 1: Nil pointer dereference pada session cache
-│   │       ├── t1_map_race.go      # Tier 1: Concurrent map data race
-│   │       ├── t2_goroutine_leak.go# Tier 2: Kebocoran goroutine & unstopped ticker
-│   │       ├── t2_channel_block.go # Tier 2: Goroutine hang pada unbuffered channel
-│   │       ├── t3_deadlock.go      # Tier 3: Deadlock transfer saldo (lock inversion)
-│   │       ├── t3_ctx_propagate.go # Tier 3: Kegagalan propagasi pembatalan context
-│   │       ├── t4_atomic_cas.go    # Tier 4: Race condition & stale read lock-free queue
-│   │       └── t4_fsm_race.go      # Tier 4: Concurrent order state machine race
-│   ├── bot/                        # Telegram router, wizard FSM, views & keyboards
-│   ├── config/                     # Parser variabel lingkungan (.env)
-│   ├── health/                     # HTTP health server (:8080 /, /healthz, /readyz, /stats)
-│   ├── pricing/                    # Kalkulasi biaya token & auto-sync OpenRouter
-│   ├── queue/                      # Worker pool, job deduplikasi, progress throttler
-│   ├── sandbox/                    # AST security guard, dynamic port, ephemeral runner
-│   └── storage/                    # Driver Turso LibSQL, migrasi, dan query leaderboard
+│   │   └── tasks/                  # Kasus uji bug riil terkurasi (8 task)
+│   │       ├── t1_inventory_cache.go
+│   │       ├── t1_order_validator.go
+│   │       ├── t2_rate_limiter.go
+│   │       ├── t2_worker_pool.go
+│   │       ├── t3_connection_pool.go
+│   │       ├── t3_distributed_cache.go
+│   │       ├── t4_mpmc_ring.go
+│   │       └── t4_saga_orchestrator.go
+│   └── sandbox/                    # AST security guard, dynamic port, ephemeral runner
+│       ├── ast_guard.go            # AST static analysis: blokir RCE
+│       ├── port.go                 # Dynamic port allocator
+│       └── runner.go               # Ephemeral sandbox runner
 ├── pkg/
 │   └── logger/                     # Structured 1-line logger dengan masking rahasia
-├── Dockerfile                      # Multi-stage production container
-├── docker-compose.yml              # Konfigurasi deployment docker compose
-├── go.mod                          # Go module dependencies
+├── Dockerfile                      # Multi-stage production container (non-root)
+├── docker-compose.yml              # Konfigurasi orkestrasi container
+├── .dockerignore                   # Pola berkas yang diabaikan saat docker build
+├── go.mod                          # Go module (100% standard library)
+├── go.sum
 ├── .env.example                    # Template konfigurasi environment
 ├── AGENTS.md                       # Panduan arsitektur komprehensif untuk AI Agent
-├── MIGRATION.md                    # Roadmap migrasi arsitektur ke Go SWE-bench
-└── README.md                       # Dokumentasi utama proyek
+├── MIGRATION.md                    # Roadmap migrasi arsitektur
+├── README.md                       # Dokumentasi utama proyek
+└── TODO.md                         # Rencana kerja pengembangan benchmark server
 ```
 
 ---
@@ -183,88 +185,234 @@ OMM/
 ## 💻 Persyaratan Sistem
 
 - **Go**: Versi 1.24 atau lebih baru (dengan GCC / CGO aktif untuk `-race`).
-- **Database**: Akun [Turso LibSQL](https://turso.tech/) (atau SQLite lokal).
-- **Telegram Bot**: Token bot yang diperoleh dari [@BotFather](https://t.me/BotFather).
-- **Docker & Docker Compose** (opsional untuk deployment server).
+- **OS**: Linux, macOS, atau Windows.
 
 ---
 
-## 🚀 Panduan Instalasi & Menjalankan Lokal
+## 🌐 Dokumentasi HTTP API Server
 
-### 1. Kloning Repositori & Persiapkan Environment
+`omm-bench` mengekspos endpoint HTTP RESTful berkinerja tinggi berbasis standard library `net/http` dengan zero external dependencies.
+
+### 1. Header Autentikasi & Keamanan
+Semua endpoint di bawah `/api/` (kecuali probe health check) mewajibkan otorisasi menggunakan Bearer token yang dicocokkan terhadap `OMM_BENCH_SECRET` melalui *constant-time comparison* (`crypto/subtle`):
+
+```http
+Authorization: Bearer <OMM_BENCH_SECRET>
+Content-Type: application/json
+```
+
+### 2. Endpoints
+
+#### `POST /api/bench`
+Mendaftarkan pekerjaan evaluasi benchmark baru ke dalam antrean worker pool.
+
+- **Request Body (JSON, max 1MB):**
+```json
+{
+  "runId": "run-2026-09-08-001",
+  "source": "omm-web",
+  "callbackUrl": "https://omm-web.example.com/api/callbacks/bench",
+  "provider": "openrouter",
+  "model": "anthropic/claude-3.5-sonnet",
+  "apiKey": "sk-or-v1-...",
+  "baseUrl": "https://openrouter.ai/api/v1",
+  "streamLogs": true
+}
+```
+
+| Field | Tipe | Wajib | Keterangan |
+|:---|:---:|:---:|:---|
+| `runId` | string | Ya | Identifier unik eksekusi benchmark. |
+| `source` | string | Ya | Asal pemanggil untuk penandaan dan per-source rate limiting. |
+| `callbackUrl` | string | Ya | URL webhook callback untuk laporan progres dan hasil (terlindungi proteksi SSRF). |
+| `provider` | string | Ya | Nama provider AI (`openai`, `openrouter`, `ollama`, `groq`, dll.). |
+| `model` | string | Ya | Model identifier (contoh: `gpt-4o`, `deepseek/deepseek-r1`). |
+| `apiKey` | string | Opsional | Kunci API (dikosongkan untuk model lokal/Ollama; tidak pernah di-log & zeroed in-memory). |
+| `baseUrl` | string | Opsional | URL dasar provider API (terlindungi proteksi SSRF). |
+| `streamLogs` | bool | Opsional | Jika `true`, mengirimkan callback `log` untuk tiap task yang selesai. |
+
+- **Response Codes:**
+  - `202 Accepted`: Job berhasil diverifikasi dan diterima ke dalam antrean.
+    ```json
+    {
+      "status": "accepted",
+      "jobId": "run-2026-09-08-001",
+      "message": "Benchmark job queued successfully"
+    }
+    ```
+  - `400 Bad Request`: Payload JSON tidak valid, field wajib kosong, atau pelanggaran SSRF pada URL.
+  - `401 Unauthorized`: Header `Authorization` tidak ada atau secret token salah.
+  - `413 Request Entity Too Large`: Ukuran body request melebihi batas 1MB.
+  - `429 Too Many Requests`: Melebihi kuota rate limit global atau per-source.
+  - `503 Service Unavailable`: Antrean worker pool penuh (kapasitas maksimum tercapai).
+
+#### `GET /api/bench/status`
+Memeriksa status utilisasi worker pool dan kapasitas antrean saat ini.
+
+- **Response (`200 OK`):**
+```json
+{
+  "activeJobs": 1,
+  "maxJobs": 3,
+  "queueCapacity": 6,
+  "queueAvailable": 5
+}
+```
+
+#### `GET /`
+Endpoint landing / penemuan layanan yang mengembalikan metadata server dan daftar rute yang tersedia. Endpoint ini bersifat publik (tanpa autentikasi).
+
+- **Response (`200 OK`):**
+```json
+{
+  "name": "OMM Benchmark Server",
+  "service": "omm-bench",
+  "version": "1.0.0",
+  "status": "running",
+  "uptime": "2h30m15s",
+  "description": "Stateless Native Go SWE-bench Concurrency Ladder API Server",
+  "endpoints": {
+    "root": "GET /",
+    "health": "GET /healthz",
+    "ready": "GET /readyz",
+    "bench": "POST /api/bench",
+    "status": "GET /api/bench/status"
+  }
+}
+```
+
+#### `GET /healthz` & `GET /readyz`
+Probe liveness dan readiness untuk Kubernetes / Docker / load balancer. Endpoint ini bersifat publik (tanpa autentikasi).
+
+- **`GET /healthz` (`200 OK`):**
+```json
+{"status":"ok"}
+```
+- **`GET /readyz` (`200 OK` atau `503 Service Unavailable`):**
+```json
+{"status":"ready"}
+```
+
+---
+
+## 📡 Protokol HTTP Callback
+
+Selama evaluasi berlangsung secara asinkron di worker pool, `omm-bench` mengirimkan event HTTP POST secara real-time ke `callbackUrl` klien:
+
+### 1. Event `progress`
+Dikirim pada setiap transisi tahapan ladder (inisialisasi, tiap tier, kalkulasi hasil).
+```json
+{
+  "type": "progress",
+  "jobId": "run-2026-09-08-001",
+  "stage": "t1_junior",
+  "progress": 25,
+  "detail": "Evaluating Tier 1: Junior"
+}
+```
+
+### 2. Event `log`
+Dikirim setiap kali sebuah task pengujian selesai dievaluasi (jika `streamLogs: true`).
+```json
+{
+  "type": "log",
+  "jobId": "run-2026-09-08-001",
+  "taskId": "swe-t1-order-validator-01",
+  "tier": "JUNIOR",
+  "resolved": true,
+  "hasRace": false,
+  "attempts": 1,
+  "points": 20,
+  "maxPoints": 20,
+  "durationMs": 2341
+}
+```
+
+### 3. Event `result`
+Dikirim setelah seluruh ladder selesai dievaluasi dengan skor total, laporan komprehensif, dan estimasi biaya token.
+```json
+{
+  "type": "result",
+  "jobId": "run-2026-09-08-001",
+  "totalPoints": 95,
+  "maxPoints": 100,
+  "grade": "Grade S (Staff Engineer)",
+  "totalDurationMs": 28450,
+  "totalPromptTokens": 14200,
+  "totalCompletionTokens": 3100,
+  "estimatedCostUsd": 0.0452,
+  "report": {
+    "total_score": 95,
+    "max_score": 100,
+    "grade": "Grade S (Staff Engineer)",
+    "tier_results": []
+  }
+}
+```
+
+### 4. Event `error`
+Dikirim apabila terjadi kegagalan fatal (timeout evaluasi, kegagalan fatal worker).
+```json
+{
+  "type": "error",
+  "jobId": "run-2026-09-08-001",
+  "error": "evaluation timeout reached after 300s"
+}
+```
+
+> **Keandalan Callback:** Klien callback dilengkapi mekanisme retry otomatis (3x percobaan dengan backoff eksponensial dan timeout per-request 10 detik).
+
+---
+
+## 🐳 Panduan Deployment & Kontainerisasi
+
+### 1. Menjalankan dengan Docker Compose (Direkomendasikan)
+OMM menyediakan multi-stage `Dockerfile` dengan non-root user (`appuser:10001`), resource limits (2 CPU, 2GB RAM), dan built-in healthcheck:
+
 ```bash
-git clone https://github.com/dickymuliafiqri/OMM.git
-cd OMM
+# Salin konfigurasi environment
 cp .env.example .env
-```
 
-Edit file `.env` dan isi token Telegram Anda serta kredensial database:
-```env
-TELEGRAM_BOT_TOKEN="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
-BOT_ADMIN_IDS="12345678"
-TURSO_DATABASE_URL="libsql://your-db-name.turso.io"
-TURSO_AUTH_TOKEN="your-turso-auth-token"
-```
-
-### 2. Jalankan Seluruh Unit Test
-```bash
-go test -v -count=1 ./...
-```
-
-### 3. Jalankan Telegram Bot
-```bash
-go run ./cmd/bot
-```
-
-Bot akan segera aktif dan mulai menerima pesan dari pengguna Telegram.
-
----
-
-## 🖥️ Penggunaan Mandiri (CLI Mode)
-
-Selain bot Telegram, evaluasi model dan validasi task dapat dijalankan secara lokal melalui CLI:
-
-```bash
-# 1. Uji kepatuhan Fail-to-Pass (F2P) pada seluruh task terkurasi
-go run ./cmd/cli -verify-all
-
-# 2. Uji ladder 4-tier lokal menggunakan reference solution (benchmark mandiri)
-go run ./cmd/cli -ladder
-
-# 3. Uji model AI langsung terhadap 4-Tier Ladder SWE-bench
-go run ./cmd/cli -ladder -url "https://api.openai.com/v1" -key "sk-..." -model "gpt-4o"
-
-# 4. Uji task spesifik dengan model AI
-go run ./cmd/cli -task "swe-t1-nil-pointer-01" -url "https://api.groq.com/openai/v1" -key "gsk_..." -model "llama-3.3-70b-versatile"
-
-# 5. Uji file solusi Go lokal terhadap task tertentu
-go run ./cmd/cli -task "swe-t1-nil-pointer-01" -file "path/to/solution.go"
-```
-
----
-
-## 🐳 Deployment via Docker & VPS
-
-Aplikasi telah dilengkapi dengan `Dockerfile` multi-stage berbasis Debian Slim yang memuat Go compiler dan `gcc` sehingga race detector (`-race`) dapat bekerja tanpa kendala di dalam container.
-
-### 1. Build & Jalankan dengan Docker Compose
-```bash
+# Jalankan server via Docker Compose
 docker compose up -d --build
-```
 
-### 2. Periksa Status Kontainer & Log
-```bash
-# Cek log aplikasi
-docker compose logs -f benchmark-bot
-
-# Cek status kesehatan container
+# Periksa status container dan health check
 docker compose ps
+
+# Periksa log server
+docker compose logs -f omm-bench
 ```
 
-### 3. Verifikasi Endpoint Health Check & Overview
+### 2. Menjalankan Binary Native (Bare Metal / VM)
+OMM 100% menggunakan pustaka standar Go tanpa library pihak ketiga:
+
 ```bash
-curl http://localhost:8080/
-curl http://localhost:8080/healthz
+# 1. Kompilasi binary server
+go build -o omm-bench ./cmd/bench
+
+# 2. Atur environment variables wajib
+export OMM_LISTEN_ADDR=":9090"
+export OMM_BENCH_SECRET="generate-a-secure-random-secret-key-here"
+
+# 3. Jalankan server
+./omm-bench
+```
+
+---
+
+## 🧪 Verifikasi & Pengujian
+
+Sebagai server benchmark murni, seluruh evaluasi fungsional dan keamanan diverifikasi melalui Go testing toolchain:
+
+```bash
+# 1. Jalankan seluruh unit & integration test (termasuk verifikasi F2P dan race detector)
+go test -race -count=1 ./...
+
+# 2. Periksa kebersihan kode dengan Go static analysis
+go vet ./...
+
+# 3. Bangun biner HTTP API benchmark server
+go build -o omm-bench ./cmd/bench
 ```
 
 ---
@@ -273,45 +421,15 @@ curl http://localhost:8080/healthz
 
 | Variabel | Tipe | Default | Deskripsi |
 |:---|:---:|:---:|:---|
-| `TELEGRAM_BOT_TOKEN` | String | *Wajib* | Token bot Telegram dari @BotFather. |
-| `BOT_ADMIN_IDS` | String | `""` | Daftar Telegram ID admin (pisahkan koma: `123,456`). |
-| `TURSO_DATABASE_URL` | String | `:memory:` | URL LibSQL Turso (`libsql://...`) atau file SQLite lokal. |
-| `TURSO_AUTH_TOKEN` | String | `""` | Token autentikasi database Turso. |
-| `MAX_CONCURRENT_WORKERS` | Int | `3` | Jumlah worker goroutine paralel untuk sandbox. |
-| `MAX_QUEUE_SIZE` | Int | `20` | Kapasitas antrean sebelum backpressure (`ErrQueueFull`). |
-| `PER_USER_HOURLY_LIMIT` | Int | `5` | Batas maksimum benchmark per pengguna dalam 1 jam. |
-| `HEALTH_CHECK_PORT` | Int | `8080` | Port HTTP internal untuk `/`, `/healthz`, `/readyz`, dan `/stats`. |
-| `WHITELIST_MODE` | Bool | `false` | Jika `true`, hanya ID dalam whitelist/admin yang dapat mengakses bot. |
-| `WHITELIST_USER_IDS` | String | `""` | Daftar Telegram ID yang diizinkan saat whitelist aktif. |
-
----
-
-## 🤖 Daftar Perintah Telegram Bot
-
-### Perintah Pengguna Publik
-- `/start` — Menampilkan salam pembuka, kebijakan privasi kredensial, dan tombol navigasi utama.
-- `/help` — Panduan penggunaan dan rubrik penilaian detail 4-Tier SWE-bench Ladder (100 poin).
-- `/benchmark` — Memulai wizard interaktif (kredensial tersimpan, pilih preset URL, fetch `/models`, validasi ping test).
-- `/resetkey` — Menghapus kredensial API Key dan Base URL yang tersimpan di database.
-- `/leaderboard` — Melihat peringkat model AI terbaik berdasarkan Skor Tertinggi dan Efisiensi Biaya.
-- `/history` — Melihat riwayat pengujian akun pengguna dan mengunduh laporan CSV/kode Go.
-- `/cancel` — Membatalkan sesi form wizard yang sedang aktif.
-
-### Perintah Khusus Admin (`BOT_ADMIN_IDS`)
-- `/admin` atau `/admin help` — Menampilkan menu bantuan administrasi.
-- `/admin stats` — Melihat statistik performa, error rate, beban antrean, dan uptime.
-- `/admin ban <telegram_id>` — Memblokir pengguna dari sistem.
-- `/admin unban <telegram_id>` — Mencabut status blokir pengguna.
-- `/admin resetquota <telegram_id>` — Mereset batas kuota penggunaan per jam milik pengguna.
-
----
-
-## 🩺 Observability & Health Check
-
-Server HTTP bawaan menyediakan endpoint observabilitas:
-- `GET /healthz` — Liveness probe (memeriksa konektivitas basis data dan queue).
-- `GET /readyz` — Readiness probe untuk orkestrator kontainer / Kubernetes.
-- `GET /stats` — Metrik statistik performa agregat dalam format JSON.
+| `OMM_LISTEN_ADDR` | String | `:9090` | Alamat dan port HTTP server. |
+| `OMM_BENCH_SECRET` | String | *Wajib* | Shared secret HMAC antara omm-web dan omm-bench. |
+| `OMM_ALLOWED_ORIGINS` | String | `""` | Daftar origin CORS yang diizinkan (dipisah koma). |
+| `OMM_ALLOW_LOCALHOST` | Boolean | `true` | Izinkan request HTTP ke/dari localhost untuk dev lokal (Ollama / web lokal). |
+| `OMM_MAX_CONCURRENT_JOBS` | Int | `3` | Jumlah maksimum evaluasi bersamaan. |
+| `OMM_JOB_TIMEOUT_SEC` | Int | `300` | Batas waktu per pekerjaan benchmark (detik). |
+| `OMM_GLOBAL_RATE_LIMIT` | Int | `30` | Batas maksimum permintaan per menit secara global. |
+| `OMM_PER_SOURCE_RATE_LIMIT` | Int | `5` | Batas maksimum permintaan per menit per sumber. |
+| `OMM_LOG_LEVEL` | String | `info` | Tingkat keparahan log (`debug`, `info`, `warn`, `error`). |
 
 ---
 

@@ -1,32 +1,20 @@
 services:
-  benchmark-bot:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: omm-benchmark-bot
-    restart: unless-stopped
-    env_file:
-      - .env
+  omm-bench:
+    build: .
     ports:
-      - "${HEALTH_CHECK_PORT:-8080}:8080"
+      - "9090:9090"
     environment:
-      - HEALTH_CHECK_PORT=8080
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "20m"
-        max-file: "5"
+      - OMM_LISTEN_ADDR=:9090
+      - OMM_BENCH_SECRET=${OMM_BENCH_SECRET}
+      - OMM_ALLOWED_ORIGINS=${OMM_ALLOWED_ORIGINS}
+      - OMM_MAX_CONCURRENT_JOBS=${OMM_MAX_CONCURRENT_JOBS:-3}
+      - OMM_JOB_TIMEOUT_SEC=${OMM_JOB_TIMEOUT_SEC:-300}
+      - OMM_GLOBAL_RATE_LIMIT=${OMM_GLOBAL_RATE_LIMIT:-30}
+      - OMM_PER_SOURCE_RATE_LIMIT=${OMM_PER_SOURCE_RATE_LIMIT:-5}
+      - OMM_LOG_LEVEL=${OMM_LOG_LEVEL:-info}
+    restart: unless-stopped
     deploy:
       resources:
         limits:
-          cpus: "2.0"
-          memory: 2048M
-        reservations:
-          cpus: "0.5"
-          memory: 512M
+          memory: 2G
+          cpus: '2'

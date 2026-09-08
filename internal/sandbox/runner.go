@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"benchmark/pkg/logger"
 )
 
 // RunEnvironment represents an isolated sandbox execution environment for a single evaluation
@@ -92,6 +94,8 @@ func (r *Runner) Prepare(sourceCode string, assignedPort int) (*RunEnvironment, 
 	}
 	binaryPath := filepath.Join(tempDir, binaryName)
 
+	logger.Debug("sandbox.prepare", "assigned_port=%d port=%d dir=%s", assignedPort, port, filepath.Base(tempDir))
+
 	return &RunEnvironment{
 		TempDir:    tempDir,
 		SourceFile: sourcePath,
@@ -139,6 +143,8 @@ func (r *Runner) VerifyCompile(sourceCode string) (bool, string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()
 
+	logger.Debug("sandbox.compile_start", "dir=%s code_len=%d", filepath.Base(tempDir), len(sourceCode))
+
 	cmd := exec.CommandContext(ctx, "go", "build", "-race", "-o", binOutput, sourcePath)
 	cmd.Dir = tempDir
 	var stderr bytes.Buffer
@@ -149,9 +155,11 @@ func (r *Runner) VerifyCompile(sourceCode string) (bool, string, error) {
 		if errMsg == "" {
 			errMsg = err.Error()
 		}
+		logger.Debug("sandbox.compile_done", "passed=false err=%s", errMsg)
 		return false, errMsg, nil
 	}
 
+	logger.Debug("sandbox.compile_done", "passed=true")
 	return true, "", nil
 }
 

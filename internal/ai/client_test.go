@@ -749,3 +749,115 @@ func TestClient_ChatStream_FallbackOn400(t *testing.T) {
 		t.Errorf("expected 2 calls (1 stream, 1 fallback), got %d", callCount)
 	}
 }
+
+func TestClient_ExplicitConfigAndMultiTurnChat(t *testing.T) {
+	reqCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqCount++
+		var req chatRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+
+		if reqCount == 1 {
+			// Turn 1
+			if len(req.Messages) != 1 {
+				t.Errorf("expected 1 message in turn 1, got %d", len(req.Messages))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(chatResponse{
+				Choices: []chatChoice{
+					{
+						Message: struct {
+							Role    string `json:"role"`
+							Content string `json:"content"`
+						}{
+							Role:    "assistant",
+							Content: "Turn 1 answer",
+						},
+					},
+				},
+				Usage: chatUsage{
+					PromptTokens:     50,
+					CompletionTokens: 25,
+					TotalTokens:      75,
+				},
+			})
+			return
+		}
+
+		// Turn 2
+		if len(req.Messages) != 3 {
+			t.Errorf("expected 3 messages in turn 2, got %d", len(req.Messages))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(chatResponse{
+			Choices: []chatChoice{
+				{
+					Message: struct {
+						Role    string `json:"role"`
+						Content string `json:"content"`
+					}{
+						Role:    "assistant",
+						Content: "Turn 2 improved answer",
+					},
+				},
+			},
+			Usage: chatUsage{
+				PromptTokens:     100,
+				CompletionTokens: 40,
+				TotalTokens:      140,
+			},
+		})
+	}))
+	defer server.Close()
+
+	// Instantiate using ClientConfig
+	cfg := ClientConfig{
+		BaseURL: server.URL,
+		APIKey:  "sk-test-explicit-key",
+		Model:   "test-explicit-model",
+		Timeout: 5 * time.Second,
+	}
+	client, err := NewClient(cfg)
+	if err != nil {
+		t.Fatalf("NewClient failed with ClientConfig: %v", err)
+	}
+
+	// Turn 1
+	messages := []ChatMessage{
+		{Role: "user", Content: "initial question"},
+	}
+	res1, err := client.Chat(context.Background(), messages)
+	if err != nil {
+		t.Fatalf("Chat turn 1 failed: %v", err)
+	}
+	if res1.Content != "Turn 1 answer" {
+		t.Errorf("unexpected content turn 1: %s", res1.Content)
+	}
+
+	// Turn 2
+	messages = append(messages, ChatMessage{Role: "assistant", Content: res1.Content})
+	messages = append(messages, ChatMessage{Role: "user", Content: "feedback on answer"})
+
+	res2, err := client.Chat(context.Background(), messages)
+	if err != nil {
+		t.Fatalf("Chat turn 2 failed: %v", err)
+	}
+	if res2.Content != "Turn 2 improved answer" {
+		t.Errorf("unexpected content turn 2: %s", res2.Content)
+	}
+
+	totalPromptTokens := res1.PromptTokens + res2.PromptTokens
+	totalCompletionTokens := res1.CompletionTokens + res2.CompletionTokens
+	totalTokens := res1.TotalTokens + res2.TotalTokens
+
+	if totalPromptTokens != 150 {
+		t.Errorf("expected 150 prompt tokens, got %d", totalPromptTokens)
+	}
+	if totalCompletionTokens != 65 {
+		t.Errorf("expected 65 completion tokens, got %d", totalCompletionTokens)
+	}
+	if totalTokens != 215 {
+		t.Errorf("expected 215 total tokens, got %d", totalTokens)
+	}
+}
+

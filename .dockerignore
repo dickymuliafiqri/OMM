@@ -2,7 +2,9 @@
 .gitignore
 .env
 *.exe
-*.log
+omm-bench
+omm-cli
+bin/
 tmp/
-scratch/
-TODO.md
+*.log
+.DS_Store

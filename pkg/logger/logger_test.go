@@ -69,3 +69,65 @@ func TestLogOutput_SingleLine(t *testing.T) {
 		}
 	}
 }
+
+func TestLogger_LevelsAndStructuredLogging(t *testing.T) {
+	var buf bytes.Buffer
+	SetOutput(&buf)
+
+	// 1. Level Warn - Debug and Info should be dropped
+	SetLevel(LevelWarn)
+	if GetLevel() != LevelWarn {
+		t.Errorf("expected LevelWarn, got %v", GetLevel())
+	}
+
+	Debug("debug.event", "detail=1")
+	Info("info.event", "detail=2")
+	Warn("auth.rejected", "ip=1.2.3.4 reason=invalid_secret")
+	Error("bench.error", "jobId=123 error=%q", "timeout")
+
+	output := buf.String()
+	if strings.Contains(output, "debug.event") {
+		t.Errorf("Debug log should have been filtered out")
+	}
+	if strings.Contains(output, "info.event") {
+		t.Errorf("Info log should have been filtered out")
+	}
+	if !strings.Contains(output, "auth.rejected ip=1.2.3.4 reason=invalid_secret") {
+		t.Errorf("Warn log missing: %s", output)
+	}
+	if !strings.Contains(output, "bench.error jobId=123 error=\"timeout\"") {
+		t.Errorf("Error log missing: %s", output)
+	}
+
+	// 2. Reset back to LevelDebug - all should appear
+	buf.Reset()
+	SetLevel(LevelDebug)
+	Debug("test.debug", "val=123")
+	Info("server.start", "listen=:9090 workers=3")
+
+	outDebug := buf.String()
+	if !strings.Contains(outDebug, "test.debug val=123") {
+		t.Errorf("expected debug log, got: %s", outDebug)
+	}
+	if !strings.Contains(outDebug, "server.start listen=:9090 workers=3") {
+		t.Errorf("expected info log, got: %s", outDebug)
+	}
+
+	// 3. Test ParseLevel
+	if ParseLevel("debug") != LevelDebug {
+		t.Errorf("ParseLevel('debug') failed")
+	}
+	if ParseLevel("info") != LevelInfo {
+		t.Errorf("ParseLevel('info') failed")
+	}
+	if ParseLevel("warn") != LevelWarn || ParseLevel("warning") != LevelWarn {
+		t.Errorf("ParseLevel('warn') failed")
+	}
+	if ParseLevel("error") != LevelError {
+		t.Errorf("ParseLevel('error') failed")
+	}
+	if ParseLevel("unknown") != LevelInfo {
+		t.Errorf("ParseLevel('unknown') expected default LevelInfo")
+	}
+}
+

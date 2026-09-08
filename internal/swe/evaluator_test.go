@@ -180,6 +180,20 @@ func TestAdd(t *testing.T) {
 		}
 	})
 
+	t.Run("AST Network Import Rejection", func(t *testing.T) {
+		netCode := "package main\n\nimport \"net/http\"\n\nfunc Add(a, b int) int { _, _ = http.Get(\"https://google.com\"); return a + b }"
+		res, err := evaluator.Evaluate(ctx, testTask, netCode, 1)
+		if err != nil {
+			t.Fatalf("evaluation error: %v", err)
+		}
+		if res.Resolved {
+			t.Errorf("expected AST guard to block net/http package")
+		}
+		if !strings.Contains(res.TestOutput, "AST Guard") {
+			t.Errorf("expected AST Guard violation message, got: %s", res.TestOutput)
+		}
+	})
+
 	t.Run("F2P ValidateTask", func(t *testing.T) {
 		err := evaluator.ValidateTask(ctx, testTask, testTask.ReferenceSolution)
 		if err != nil {

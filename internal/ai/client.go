@@ -27,6 +27,9 @@ type Config struct {
 	ReasoningEffort string        // AI reasoning effort level ("low", "medium", "high", default "low")
 }
 
+// ClientConfig is an alias for Config to support standard naming conventions.
+type ClientConfig = Config
+
 // GenerationResult stores the AI code generation result along with its metrics
 type GenerationResult struct {
 	RawResponse      string        `json:"raw_response"`
@@ -64,7 +67,7 @@ func NewClient(cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("base_url tidak boleh kosong")
 	}
 	if cfg.Timeout <= 0 {
-		cfg.Timeout = 3 * time.Minute // Default 3 minutes
+		cfg.Timeout = 120 * time.Second // Strict default 120s timeout per inference request
 	}
 	if cfg.Temperature <= 0 {
 		cfg.Temperature = 0.2
@@ -80,7 +83,7 @@ func NewClient(cfg Config) (*Client, error) {
 	rootURL = strings.TrimSuffix(rootURL, "/models")
 	rootURL = strings.TrimRight(rootURL, "/")
 
-	return &Client{
+	client := &Client{
 		rootBaseURL:     rootURL,
 		chatURL:         rootURL + "/chat/completions",
 		modelsURL:       rootURL + "/models",
@@ -92,7 +95,11 @@ func NewClient(cfg Config) (*Client, error) {
 		httpClient: &http.Client{
 			Timeout: cfg.Timeout,
 		},
-	}, nil
+	}
+
+	logger.Debug("ai.client_created", "root_url=%s chat_url=%s model=%s timeout=%v temp=%.2f reasoning=%s", rootURL, client.chatURL, cfg.Model, cfg.Timeout, cfg.Temperature, reasoningEffort)
+
+	return client, nil
 }
 
 // SetModel updates the model used by the client
@@ -128,8 +135,11 @@ func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 	}
 	candidateURLs = append(candidateURLs, cleanRoot+"/api/tags")
 
+	logger.Debug("ai.list_models", "root=%s candidates=%d", cleanRoot, len(candidateURLs))
+
 	var lastErr error
 	for _, targetURL := range candidateURLs {
+		logger.Debug("ai.list_models_attempt", "target=%s", targetURL)
 		reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		models, err := c.tryFetchModels(reqCtx, targetURL, start)
 		cancel()
@@ -140,6 +150,7 @@ func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 				c.modelsURL = targetURL
 				c.chatURL = cleanRoot + "/v1/chat/completions"
 			}
+			logger.Debug("ai.list_models_success", "target=%s models=%d", targetURL, len(models))
 			logger.AIRes(c.rootBaseURL, "HTTP 200 OK", time.Since(start), 0, 0, 0, fmt.Sprintf("models_found=%d", len(models)))
 			return models, nil
 		}
@@ -262,6 +273,7 @@ func (c *Client) TestModel(ctx context.Context, model string) error {
 	}
 
 	start := time.Now()
+	logger.Debug("ai.test_model", "model=%s url=%s", model, c.chatURL)
 	logger.AIReq(c.rootBaseURL, "/chat/completions", "PingTest", "model="+model)
 
 	testReq := chatRequest{
@@ -354,6 +366,7 @@ func (c *Client) TestModel(ctx context.Context, model string) error {
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(respBody)))
 	}
 
+	logger.Debug("ai.test_model_ok", "model=%s duration_ms=%d", model, time.Since(start).Milliseconds())
 	logger.AIRes(model, "HTTP 200 OK", time.Since(start), 0, 0, 0, "ping=OK")
 	return nil
 }
@@ -460,6 +473,8 @@ func (c *Client) Chat(ctx context.Context, messages []ChatMessage) (*ChatResult,
 	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 
+	logger.Debug("ai.chat_dispatch", "model=%s messages=%d bytes=%d url=%s", c.model, len(messages), len(bodyBytes), c.chatURL)
+
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.chatURL, bytes.NewReader(bodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("gagal membuat http request: %w", err)
@@ -529,6 +544,7 @@ func (c *Client) Chat(ctx context.Context, messages []ChatMessage) (*ChatResult,
 	}
 
 	rawContent := chatResp.Choices[0].Message.Content
+	logger.Debug("ai.chat_done", "model=%s latency_ms=%d prompt_tok=%d comp_tok=%d total_tok=%d content_len=%d", c.model, turnLatency.Milliseconds(), promptTok, compTok, totTok, len(rawContent))
 	logger.AIRes(c.model, "HTTP 200 OK", turnLatency, promptTok, compTok, totTok, fmt.Sprintf("content_len=%d", len(rawContent)))
 
 	return &ChatResult{
@@ -617,6 +633,8 @@ func (c *Client) ChatStream(ctx context.Context, messages []ChatMessage, onStrea
 		reqCtx, cancel = context.WithTimeout(ctx, c.timeout)
 		defer cancel()
 	}
+
+	logger.Debug("ai.stream_dispatch", "model=%s messages=%d bytes=%d url=%s", c.model, len(messages), len(bodyBytes), c.chatURL)
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, c.chatURL, bytes.NewReader(bodyBytes))
 	if err != nil {
@@ -803,6 +821,7 @@ func (c *Client) ChatStream(ctx context.Context, messages []ChatMessage, onStrea
 	}
 
 	turnLatency = time.Since(start)
+	logger.Debug("ai.stream_done", "model=%s latency_ms=%d prompt_tok=%d comp_tok=%d total_tok=%d content_len=%d", c.model, turnLatency.Milliseconds(), promptTok, compTok, totTok, len(finalContent))
 	logger.AIRes(c.model, "HTTP 200 OK", turnLatency, promptTok, compTok, totTok, fmt.Sprintf("stream_len=%d", len(finalContent)))
 
 	return &ChatResult{
@@ -852,6 +871,7 @@ func (c *Client) GenerateCodeWithSelfHealing(
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		start := time.Now()
+		logger.Debug("ai.self_healing_attempt", "attempt=%d/%d model=%s messages=%d", attempt, maxAttempts, c.model, len(messages))
 		logger.AIReq(c.rootBaseURL, "/chat/completions", "GenerateCode", fmt.Sprintf("model=%s attempt=%d/%d messages=%d", c.model, attempt, maxAttempts, len(messages)))
 
 		reqBody := chatRequest{
@@ -999,6 +1019,8 @@ func (c *Client) GenerateCodeWithSelfHealing(
 			passed = true
 		}
 
+		logger.Debug("ai.verifier_check", "attempt=%d passed=%t err_len=%d", attempt, passed, len(stderrMsg))
+
 		if passed {
 			if attempt > 1 {
 				logger.Sys("AI", "Model %s berhasil memperbaiki kode pada attempt %d!", c.model, attempt)
@@ -1036,6 +1058,8 @@ func (c *Client) GenerateCodeWithSelfHealing(
 		if progressFn != nil {
 			progressFn(fmt.Sprintf("Kompilasi ke-%d gagal. Mengirim feedback error ke AI untuk perbaikan mandiri (Percobaan %d/%d)...", attempt, attempt+1, maxAttempts))
 		}
+
+		logger.Debug("ai.self_healing_prep", "attempt=%d next_attempt=%d err_summary=%s", attempt, attempt+1, extractTail(stderrMsg, 120))
 
 		// Compose multi-turn history messages for the next repair round
 		messages = append(messages, ChatMessage{

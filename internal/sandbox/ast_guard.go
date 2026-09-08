@@ -6,6 +6,8 @@ import (
 	"go/parser"
 	"go/token"
 	"strings"
+
+	"benchmark/pkg/logger"
 )
 
 // Violation stores details of security violations detected in the code AST
@@ -37,18 +39,24 @@ func (r *SecurityInspectionResult) Error() string {
 
 // forbiddenImports lists prohibited imports that could lead to RCE or host system damage
 var forbiddenImports = map[string]string{
-	"os/exec":        "Dilarang: Eksekusi command eksternal / shell berisiko RCE",
-	"syscall":        "Dilarang: Pemanggilan syscall langsung berisiko bypass sandbox OS",
-	"unsafe":         "Dilarang: Manipulasi memori langsung / type evasion",
-	"plugin":         "Dilarang: Dynamic loading library eksternal .so/.dll",
-	"runtime/cgo":    "Dilarang: Eksekusi kode native C / Cgo",
-	"C":              "Dilarang: Eksekusi kode native C / Cgo",
+	"os/exec":          "Dilarang: Eksekusi command eksternal / shell berisiko RCE",
+	"syscall":          "Dilarang: Pemanggilan syscall langsung berisiko bypass sandbox OS",
+	"unsafe":           "Dilarang: Manipulasi memori langsung / type evasion",
+	"plugin":           "Dilarang: Dynamic loading library eksternal .so/.dll",
+	"runtime/cgo":      "Dilarang: Eksekusi kode native C / Cgo",
+	"C":                "Dilarang: Eksekusi kode native C / Cgo",
 	"golang.org/x/sys": "Dilarang: Low-level OS syscall manipulation",
+}
+
+// networkImports lists network-related packages to prevent SSRF and external network access from AI code.
+var networkImports = map[string]string{
+	"net": "Dilarang: Akses jaringan / socket eksternal berisiko SSRF atau eksfiltrasi data",
 }
 
 // InspectAST inspects the Go syntax and abstract syntax tree (AST).
 // It validates the absence of forbidden packages and high-risk function calls.
-func InspectAST(sourceCode string) (*SecurityInspectionResult, error) {
+// Optional blockNetwork parameter enables blocking of network access ('net' and subpackages).
+func InspectAST(sourceCode string, blockNetwork ...bool) (*SecurityInspectionResult, error) {
 	fset := token.NewFileSet()
 	node, err := parser.ParseFile(fset, "server.go", sourceCode, parser.AllErrors)
 	if err != nil {
@@ -59,6 +67,10 @@ func InspectAST(sourceCode string) (*SecurityInspectionResult, error) {
 		Passed:     true,
 		Violations: make([]Violation, 0),
 	}
+
+	shouldBlockNetwork := len(blockNetwork) > 0 && blockNetwork[0]
+	lineCount := len(strings.Split(sourceCode, "\n"))
+	logger.Debug("ast_guard.scan", "lines=%d imports=%d block_network=%t", lineCount, len(node.Imports), shouldBlockNetwork)
 
 	// 1. Check Package Imports
 	for _, imp := range node.Imports {
@@ -73,6 +85,21 @@ func InspectAST(sourceCode string) (*SecurityInspectionResult, error) {
 					Line:        pos.Line,
 					Description: reason,
 				})
+			}
+		}
+
+		if shouldBlockNetwork {
+			for netPkg, reason := range networkImports {
+				if importPath == netPkg || strings.HasPrefix(importPath, netPkg+"/") {
+					pos := fset.Position(imp.Pos())
+					result.Passed = false
+					result.Violations = append(result.Violations, Violation{
+						Type:        "FORBIDDEN_IMPORT",
+						Target:      importPath,
+						Line:        pos.Line,
+						Description: reason,
+					})
+				}
 			}
 		}
 	}
@@ -107,12 +134,18 @@ func InspectAST(sourceCode string) (*SecurityInspectionResult, error) {
 		return true
 	})
 
+	if result.Passed {
+		logger.Debug("ast_guard.pass", "violations=0")
+	} else {
+		logger.Debug("ast_guard.violations", "count=%d first_target=%s first_type=%s", len(result.Violations), result.Violations[0].Target, result.Violations[0].Type)
+	}
+
 	return result, nil
 }
 
 // ValidateSource is a concise helper that returns an error if security violations exist
-func ValidateSource(sourceCode string) error {
-	res, err := InspectAST(sourceCode)
+func ValidateSource(sourceCode string, blockNetwork ...bool) error {
+	res, err := InspectAST(sourceCode, blockNetwork...)
 	if err != nil {
 		return err
 	}

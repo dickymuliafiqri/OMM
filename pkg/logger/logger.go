@@ -75,6 +75,27 @@ func SetLevel(lvl Level) {
 	defaultLogger.level = lvl
 }
 
+// GetLevel returns the current log level threshold
+func GetLevel() Level {
+	defaultLogger.mu.Lock()
+	defer defaultLogger.mu.Unlock()
+	return defaultLogger.level
+}
+
+// ParseLevel converts a string representation of log level into Level
+func ParseLevel(lvl string) Level {
+	switch strings.ToLower(strings.TrimSpace(lvl)) {
+	case "debug":
+		return LevelDebug
+	case "warn", "warning":
+		return LevelWarn
+	case "error":
+		return LevelError
+	default:
+		return LevelInfo
+	}
+}
+
 // CleanSingleLine cleans newlines and trims text into a single line
 func CleanSingleLine(s string, maxLen int) string {
 	s = strings.ReplaceAll(s, "\r\n", " ")
@@ -101,7 +122,11 @@ func MaskSecrets(s string) string {
 	return s
 }
 
-func (l *Logger) logLine(colorTag, tag string, content string) {
+func (l *Logger) logLine(lvl Level, colorTag, tag string, content string) {
+	if lvl < l.level {
+		return
+	}
+
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
 
 	l.mu.Lock()
@@ -118,6 +143,40 @@ func (l *Logger) logLine(colorTag, tag string, content string) {
 	}
 }
 
+func formatEvent(event, msg string) string {
+	if event == "" {
+		return msg
+	}
+	if msg == "" {
+		return event
+	}
+	return event + " " + msg
+}
+
+// Info logs an informational single-line structured message
+func Info(event string, format string, args ...any) {
+	var msg string
+	if len(args) > 0 {
+		msg = fmt.Sprintf(format, args...)
+	} else {
+		msg = format
+	}
+	content := CleanSingleLine(formatEvent(event, msg), 0)
+	defaultLogger.logLine(LevelInfo, colorGreen, "INFO", content)
+}
+
+// Debug logs a debug single-line structured message
+func Debug(event string, format string, args ...any) {
+	var msg string
+	if len(args) > 0 {
+		msg = fmt.Sprintf(format, args...)
+	} else {
+		msg = format
+	}
+	content := CleanSingleLine(formatEvent(event, msg), 0)
+	defaultLogger.logLine(LevelDebug, colorCyan, "DEBUG", content)
+}
+
 // --- Telegram Logging ---
 
 // TGIn logs incoming messages/commands from user Telegram
@@ -127,14 +186,14 @@ func TGIn(username string, userID int64, chatID int64, text string) {
 		userDisplay = fmt.Sprintf("ID:%d", userID)
 	}
 	cleanText := CleanSingleLine(text, 80)
-	defaultLogger.logLine(colorCyan, "TG:IN",
+	defaultLogger.logLine(LevelInfo, colorCyan, "TG:IN",
 		fmt.Sprintf("user=%s (%d) chat=%d | text=\"%s\"", userDisplay, userID, chatID, cleanText))
 }
 
 // TGOut logs outgoing messages sent to Telegram
 func TGOut(chatID int64, action string, preview string) {
 	cleanPreview := CleanSingleLine(preview, 75)
-	defaultLogger.logLine(colorBlue, "TG:OUT",
+	defaultLogger.logLine(LevelInfo, colorBlue, "TG:OUT",
 		fmt.Sprintf("chat=%d action=%s | \"%s\"", chatID, action, cleanPreview))
 }
 
@@ -144,7 +203,7 @@ func TGCB(username string, userID int64, chatID int64, data string) {
 	if username == "" {
 		userDisplay = fmt.Sprintf("ID:%d", userID)
 	}
-	defaultLogger.logLine(colorCyan, "TG:CB",
+	defaultLogger.logLine(LevelInfo, colorCyan, "TG:CB",
 		fmt.Sprintf("user=%s (%d) chat=%d | data=\"%s\"", userDisplay, userID, chatID, data))
 }
 
@@ -156,7 +215,7 @@ func AIReq(target string, endpoint string, action string, extra string) {
 	if extra != "" {
 		content += " | " + extra
 	}
-	defaultLogger.logLine(colorMagenta, "AI:REQ", content)
+	defaultLogger.logLine(LevelInfo, colorMagenta, "AI:REQ", content)
 }
 
 // AIRes logs response back from AI provider (status, latency, tokens)
@@ -176,7 +235,7 @@ func AIRes(target string, status string, latency time.Duration, inTokens, outTok
 	if extra != "" {
 		parts = append(parts, extra)
 	}
-	defaultLogger.logLine(colorMagenta, "AI:RES", strings.Join(parts, " | "))
+	defaultLogger.logLine(LevelInfo, colorMagenta, "AI:RES", strings.Join(parts, " | "))
 }
 
 // --- Benchmark & Sandbox Logging ---
@@ -187,7 +246,7 @@ func BenchProgress(jobID string, step, total int, suite string, score, maxScore 
 	if len(shortID) > 8 {
 		shortID = shortID[:8]
 	}
-	defaultLogger.logLine(colorGreen, "BENCH",
+	defaultLogger.logLine(LevelInfo, colorGreen, "BENCH",
 		fmt.Sprintf("job=%s [%d/%d] %s | score=%d/%d pts | status=%s | dur=%.2fs",
 			shortID, step, total, suite, score, maxScore, status, dur.Seconds()))
 }
@@ -202,7 +261,7 @@ func BenchFinished(jobID string, model string, score, maxScore int, grade string
 	if tokens > 0 {
 		tokenStr = fmt.Sprintf(" | tokens=%d", tokens)
 	}
-	defaultLogger.logLine(colorBold+colorGreen, "BENCH",
+	defaultLogger.logLine(LevelInfo, colorBold+colorGreen, "BENCH",
 		fmt.Sprintf("job=%s FINISHED model=%s | score=%d/%d [%s] | time=%.1fs%s",
 			shortID, model, score, maxScore, grade, dur.Seconds(), tokenStr))
 }
@@ -213,7 +272,7 @@ func Sandbox(jobID string, port int, action string, result string) {
 	if len(shortID) > 8 {
 		shortID = shortID[:8]
 	}
-	defaultLogger.logLine(colorGreen, "SANDBOX",
+	defaultLogger.logLine(LevelInfo, colorGreen, "SANDBOX",
 		fmt.Sprintf("job=%s port=:%d action=%s | %s", shortID, port, action, result))
 }
 
@@ -225,7 +284,7 @@ func Queue(jobID string, action string, detail string) {
 	if len(shortID) > 8 {
 		shortID = shortID[:8]
 	}
-	defaultLogger.logLine(colorYellow, "QUEUE",
+	defaultLogger.logLine(LevelInfo, colorYellow, "QUEUE",
 		fmt.Sprintf("job=%s action=%s | %s", shortID, action, detail))
 }
 
@@ -234,7 +293,7 @@ func Queue(jobID string, action string, detail string) {
 // DB logs data persistence operations
 func DB(action string, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	defaultLogger.logLine(colorWhite, "DB",
+	defaultLogger.logLine(LevelInfo, colorWhite, "DB",
 		fmt.Sprintf("action=%s | %s", action, msg))
 }
 
@@ -243,20 +302,32 @@ func DB(action string, format string, args ...any) {
 // Sys logs system lifecycle events (startup, shutdown, health)
 func Sys(action string, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	defaultLogger.logLine(colorBold+colorWhite, "SYS",
+	defaultLogger.logLine(LevelInfo, colorBold+colorWhite, "SYS",
 		fmt.Sprintf("action=%s | %s", action, msg))
 }
 
 // Warn logs system warnings
 func Warn(tag string, format string, args ...any) {
-	msg := fmt.Sprintf(format, args...)
-	defaultLogger.logLine(colorYellow, tag, msg)
+	var msg string
+	if len(args) > 0 {
+		msg = fmt.Sprintf(format, args...)
+	} else {
+		msg = format
+	}
+	content := CleanSingleLine(formatEvent(tag, msg), 0)
+	defaultLogger.logLine(LevelWarn, colorYellow, "WARN", content)
 }
 
 // Error logs single-line errors
 func Error(tag string, format string, args ...any) {
-	msg := fmt.Sprintf(format, args...)
-	defaultLogger.logLine(colorRed, tag, msg)
+	var msg string
+	if len(args) > 0 {
+		msg = fmt.Sprintf(format, args...)
+	} else {
+		msg = format
+	}
+	content := CleanSingleLine(formatEvent(tag, msg), 0)
+	defaultLogger.logLine(LevelError, colorRed, "ERROR", content)
 }
 
 // ErrorLong logs multiline long errors when strictly necessary (e.g. stack trace)

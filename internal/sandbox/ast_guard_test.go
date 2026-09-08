@@ -156,3 +156,38 @@ func TestInspectAST_SyntaxError(t *testing.T) {
 		t.Errorf("Kode rusak sintaks seharusnya menghasilkan error parsing AST")
 	}
 }
+
+func TestInspectAST_NetworkBlocking(t *testing.T) {
+	netCode := `
+package main
+import (
+	"net"
+	"net/http"
+)
+func main() {
+	_, _ = net.Dial("tcp", "example.com:80")
+	_, _ = http.Get("http://example.com")
+}
+`
+	// 1. Without network blocking -> should pass
+	res, err := InspectAST(netCode, false)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !res.Passed {
+		t.Errorf("expected pass without blockNetwork, got violations: %v", res.Violations)
+	}
+
+	// 2. With network blocking -> should fail
+	resBlocked, err := InspectAST(netCode, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resBlocked.Passed {
+		t.Errorf("expected failure when blockNetwork is true")
+	}
+	if len(resBlocked.Violations) == 0 {
+		t.Errorf("expected violations for net imports, got 0")
+	}
+}
+

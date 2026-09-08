@@ -79,3 +79,27 @@ func DefaultLadder() ([]*Task, error) {
 
 	return ladder, nil
 }
+
+// FullLadder returns all 8 curated tasks ordered strictly by tier (Junior -> Mid -> Senior -> Staff)
+func FullLadder() ([]*Task, error) {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+
+	tiers := []Tier{TierJunior, TierMid, TierSenior, TierStaff}
+	var ladder []*Task
+
+	for _, tier := range tiers {
+		tierFound := false
+		for _, t := range taskList {
+			if t.Tier == tier {
+				ladder = append(ladder, t)
+				tierFound = true
+			}
+		}
+		if !tierFound {
+			return nil, fmt.Errorf("task untuk tier %s belum terdaftar di registry", tier)
+		}
+	}
+
+	return ladder, nil
+}

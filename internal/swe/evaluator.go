@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"benchmark/internal/sandbox"
+	"benchmark/pkg/logger"
 )
 
 // Evaluator runs unit tests and -race in an ephemeral sandbox
@@ -47,6 +48,8 @@ func CalculatePoints(maxPoints int, attempt int, resolved bool, hasRace bool) in
 func (e *Evaluator) Evaluate(ctx context.Context, task *Task, solutionCode string, attempt int) (*EvalResult, error) {
 	start := time.Now()
 
+	logger.Debug("swe.eval_start", "task=%s tier=%s attempt=%d max_points=%d timeout=%v bytes=%d", task.ID, task.Tier, attempt, task.Points, e.Timeout, len(solutionCode))
+
 	result := &EvalResult{
 		TaskID:    task.ID,
 		Tier:      task.Tier,
@@ -54,12 +57,13 @@ func (e *Evaluator) Evaluate(ctx context.Context, task *Task, solutionCode strin
 		Attempts:  attempt,
 	}
 
-	// 1. Static security audit via AST Guard
-	inspection, err := sandbox.InspectAST(solutionCode)
+	// 1. Static security audit via AST Guard (with strict network blocking for SWE AI solutions)
+	inspection, err := sandbox.InspectAST(solutionCode, true)
 	if err != nil {
 		result.CompileErr = fmt.Sprintf("Gagal parse sintaks AST: %v", err)
 		result.TestOutput = result.CompileErr
 		result.DurationMs = time.Since(start).Milliseconds()
+		logger.Debug("swe.ast_parse_fail", "task=%s err=%v", task.ID, err)
 		return result, nil
 	}
 
@@ -67,6 +71,7 @@ func (e *Evaluator) Evaluate(ctx context.Context, task *Task, solutionCode strin
 		result.CompileErr = inspection.Error()
 		result.TestOutput = fmt.Sprintf("Pelanggaran keamanan terdeteksi (AST Guard):\n%s", inspection.Error())
 		result.DurationMs = time.Since(start).Milliseconds()
+		logger.Debug("swe.ast_check_fail", "task=%s violations=%d", task.ID, len(inspection.Violations))
 		return result, nil
 	}
 
@@ -90,6 +95,8 @@ func (e *Evaluator) Evaluate(ctx context.Context, task *Task, solutionCode strin
 	if err := os.WriteFile(filepath.Join(tempDir, "main_test.go"), []byte(task.TestCode), 0600); err != nil {
 		return nil, fmt.Errorf("gagal menulis main_test.go di sandbox: %w", err)
 	}
+
+	logger.Debug("swe.sandbox_ready", "task=%s dir=%s", task.ID, filepath.Base(tempDir))
 
 	// 4. Execute: go test -race -v -count=1 -timeout=30s ./...
 	evalTimeout := e.Timeout
@@ -135,6 +142,8 @@ func (e *Evaluator) Evaluate(ctx context.Context, task *Task, solutionCode strin
 		result.Points = 0
 	}
 
+	logger.Debug("swe.eval_result", "task=%s resolved=%t has_race=%t build_fail=%t points=%d/%d duration_ms=%d", task.ID, result.Resolved, hasRace, isBuildFailure, result.Points, task.Points, result.DurationMs)
+
 	return result, nil
 }
 
@@ -142,6 +151,8 @@ func (e *Evaluator) Evaluate(ctx context.Context, task *Task, solutionCode strin
 // 1. BrokenCode + TestCode MUST FAIL.
 // 2. ReferenceSolution + TestCode MUST PASS without data races.
 func (e *Evaluator) ValidateTask(ctx context.Context, task *Task, refSolution string) error {
+	logger.Debug("swe.validate_f2p", "task=%s tier=%s", task.ID, task.Tier)
+
 	// Test broken code
 	brokenRes, err := e.Evaluate(ctx, task, task.BrokenCode, 1)
 	if err != nil {

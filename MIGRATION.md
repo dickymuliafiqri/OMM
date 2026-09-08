@@ -273,6 +273,8 @@ gantt
 
 ---
 
+---
+
 ## 8. 🧪 Checklist Kepatuhan & Verifikasi Rekayasa (Sesuai AGENTS.md)
 
 Sebelum setiap fase dianggap tuntas, wajib mematuhi standar verifikasi repositori:
@@ -285,9 +287,35 @@ go test -race -count=1 ./...
 go vet ./...
 
 # 3. Seluruh entrypoint biner berhasil dikompilasi
-go build ./cmd/bot ./cmd/cli
+go build ./cmd/bench
 ```
 
 ---
 
-*Dokumen ini merupakan panduan arsitektur definitif selama proses migrasi berlangsung.*
+## 9. 🌐 Fase Lanjutan: Transformasi ke Stateless HTTP API Server (`omm-bench`)
+
+Pada September 2026, OMM beralih menjadi server benchmark backend stateless murni:
+- **Pemisahan Front-Back:** UI Telegram dan persistensi database Turso dipindahkan secara terpusat ke `omm-web` (Nuxt/Nitro).
+- **Stateless Execution:** `omm-bench` beroperasi sebagai worker engine murni tanpa database permanen, mengeksekusi 4-tier SWE ladder dan mengirimkan progres/hasil secara real-time via HTTP callback.
+- **Pembersihan Komprehensif (Fase 0):** Modul bot, storage, health lama, queue lama, and pricing didepresiasi dan dihapus, menyisakan 100% Go standard library tanpa dependensi pihak ketiga.
+- **Pure Server Mode:** Entrypoint CLI dihapus untuk fokus 100% sebagai stateless HTTP benchmark server.
+
+### 9.1 Rekapitulasi Eksekusi Migrasi (Fase 0 – 10 Selesai)
+
+| Fase | Deskripsi & Komponen | Status | Hasil & Artefak |
+|:---|:---|:---:|:---|
+| **Fase 0** | **Legacy Cleanup** | ✅ Selesai | Penghapusan bot, libSQL/turso, SQLite repository, queue lama, pricing, dan dependensi pihak ketiga. Zero external dependencies. |
+| **Fase 1** | **HTTP Server Core** | ✅ Selesai | `cmd/bench/main.go`, `internal/config/config.go`, `internal/server/router.go`, `handler_health.go` (`/healthz`, `/readyz`). |
+| **Fase 2** | **Security & Auth** | ✅ Selesai | HMAC constant-time auth, IP/DNS SSRF guard, sliding-window rate limiter, strict CORS whitelist, security headers, 1MB body limit. |
+| **Fase 3** | **Benchmark Handlers** | ✅ Selesai | `POST /api/bench` (async queueing 202), `GET /api/bench/status` (active jobs & capacity metrics). |
+| **Fase 4** | **Worker Pool** | ✅ Selesai | Semaphore worker pool (`internal/worker/pool.go`), `job.go`, `executor.go`, graceful shutdown dengan context drain. |
+| **Fase 5** | **SWE-bench Integration** | ✅ Selesai | 4-tier ladder runner (`ladder.go`), multi-turn AI client adaptation, full-file Go extraction, evaluator fail-to-pass verification. |
+| **Fase 6** | **Callback & Reporting** | ✅ Selesai | HTTP callback client (`callback.go`) dengan exponential retry, event `progress`, `log`, `result`, `error`, cost estimator (`cost.go`). |
+| **Fase 7** | **Observabilitas & Logging** | ✅ Selesai | In-memory metrics collector (`internal/metrics/`), structured 1-line logger (`pkg/logger/`), request logging middleware. |
+| **Fase 8** | **Testing & Pure Server** | ✅ Selesai | Penghapusan CLI mandiri (murni stateless server), suite pengujian integrasi server & worker (`server_test.go`, `worker_test.go`), 100% tests pass dengan `-race`. |
+| **Fase 9** | **Containerisasi** | ✅ Selesai | Multi-stage `Dockerfile` (Go 1.24 alpine build, non-root `appuser:10001`), `docker-compose.yml` dengan resource limits (2 CPU, 2GB RAM), `.dockerignore`. |
+| **Fase 10** | **Validasi Akhir** | ✅ Selesai | Verifikasi kepatuhan build (`-race`, `go vet`), audit checklist keamanan, checklist fungsional, dan sinkronisasi dokumentasi (`README.md`, `AGENTS.md`, `MIGRATION.md`, `TODO.md`). |
+
+---
+
+*Dokumen ini merupakan catatan arsitektur definitif bahwa migrasi arsitektur dari generative bot ke stateless Native Go SWE-bench API server telah selesai 100%.*
