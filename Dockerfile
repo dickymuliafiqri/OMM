@@ -22,7 +22,7 @@ RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o /bin/benchmark-cli ./c
 # Stage 2: Production Runtime
 # NOTE: Menggunakan base golang agar runtime sandbox memiliki 'go build -race'
 # dan gcc C compiler untuk menguji kode Go yang dihasilkan oleh AI secara dinamis.
-FROM golang:bookworm-slim AS runner
+FROM golang:bookworm AS runner
 ENV GOTOOLCHAIN=auto
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
