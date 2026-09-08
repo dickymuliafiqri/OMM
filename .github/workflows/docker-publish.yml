@@ -3,9 +3,9 @@ name: CI & Release Docker to GHCR
 on:
   push:
     paths-ignore:
-      - '**.md'
-      - '.gitignore'
-      - '.dockerignore'
+      - "**.md"
+      - ".gitignore"
+      - ".dockerignore"
   workflow_dispatch:
 
 jobs:
@@ -19,7 +19,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: 'stable'
+          go-version: "stable"
           cache: true
 
       - name: Download Go Dependencies
@@ -33,8 +33,7 @@ jobs:
 
       - name: Verify Binary Compilation
         run: |
-          go build -v ./cmd/bot
-          go build -v ./cmd/cli
+          go build -v ./cmd/bench
 
   docker:
     name: Build & Release to GHCR
