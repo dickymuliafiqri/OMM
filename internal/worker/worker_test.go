@@ -435,6 +435,21 @@ func TestFixMe(t *testing.T) {
 
 	var chatAttempt atomic.Int32
 	mockAIServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var reqBody map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&reqBody)
+		messages, _ := reqBody["messages"].([]any)
+		if len(messages) == 1 {
+			if firstMsg, ok := messages[0].(map[string]any); ok && firstMsg["content"] == "ping" {
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"choices": []map[string]any{
+						{"message": map[string]string{"role": "assistant", "content": "pong"}},
+					},
+				})
+				return
+			}
+		}
+
 		att := chatAttempt.Add(1)
 		var respCode string
 		if att == 1 {

@@ -235,7 +235,8 @@ func TestLadderRunner_EarlyTerminationOnFailure(t *testing.T) {
 			{ID: "t-j2", Tier: swe.TierJunior, Points: 25},
 			{ID: "t-m1", Tier: swe.TierMid, Points: 50},
 		},
-		Evaluator: swe.NewEvaluator(true),
+		Evaluator:             swe.NewEvaluator(true),
+		SkipModelVerification: true,
 	}
 
 	job := &BenchJob{
@@ -331,7 +332,8 @@ func TestLadderRunner_EarlyTerminationWithPartialScore(t *testing.T) {
 				TestCode:   "package main\n\nimport \"testing\"\n\nfunc TestMul(t *testing.T) {\n\tif Mul(2, 3) != 6 {\n\t\tt.Fatal(\"fail\")\n\t}\n}\n",
 			},
 		},
-		Evaluator: swe.NewEvaluator(true),
+		Evaluator:             &mockPassEvaluator{},
+		SkipModelVerification: true,
 	}
 
 	job := &BenchJob{
@@ -438,9 +440,10 @@ func TestLadderRunner_PerTaskTimeoutAndInferenceRetry(t *testing.T) {
 				TestCode:   "package main\n\nimport \"testing\"\n\nfunc TestMul(t *testing.T) {\n\tif Mul(2, 3) != 6 {\n\t\tt.Fatal(\"fail\")\n\t}\n}\n",
 			},
 		},
-		Evaluator: &mockPassEvaluator{},
-		TaskTimeout:         400 * time.Millisecond, // Strict per-task timeout
-		MaxInferenceRetries: 1,                      // Retry once on transient error
+		Evaluator:             &mockPassEvaluator{},
+		TaskTimeout:           400 * time.Millisecond, // Strict per-task timeout
+		MaxInferenceRetries:   1,                      // Retry once on transient error
+		SkipModelVerification: true,
 	}
 
 	job := &BenchJob{
