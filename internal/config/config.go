@@ -14,7 +14,7 @@ const (
 	DefaultListenAddr         = ":8080"
 	DefaultMaxConcurrentJobs  = 3
 	DefaultJobTimeoutSec      = 1800
-	DefaultTaskTimeoutSec     = 300
+	DefaultTaskTimeoutSec     = 600
 	DefaultGlobalRateLimit    = 30
 	DefaultPerSourceRateLimit = 5
 	DefaultLogLevel           = "info"
