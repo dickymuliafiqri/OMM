@@ -861,3 +861,127 @@ func TestClient_ExplicitConfigAndMultiTurnChat(t *testing.T) {
 	}
 }
 
+func TestClient_Chat_StreamFalseExplicit(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var rawMap map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&rawMap); err != nil {
+			t.Fatalf("decode request body failed: %v", err)
+		}
+
+		streamVal, exists := rawMap["stream"]
+		if !exists {
+			t.Errorf("expected 'stream' field to be present in request body, but it was missing")
+		}
+		if streamVal != false {
+			t.Errorf("expected 'stream' to be false, got: %v", streamVal)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(chatResponse{
+			Choices: []chatChoice{
+				{
+					Index: 0,
+					Message: struct {
+						Role    string `json:"role"`
+						Content string `json:"content"`
+					}{
+						Role:    "assistant",
+						Content: "OK non-streaming",
+					},
+				},
+			},
+			Usage: chatUsage{
+				PromptTokens:     10,
+				CompletionTokens: 5,
+				TotalTokens:      15,
+			},
+		})
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		Model:   "test-model",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := client.Chat(context.Background(), []ChatMessage{{Role: "user", Content: "hello"}})
+	if err != nil {
+		t.Fatalf("Chat failed: %v", err)
+	}
+	if res.Content != "OK non-streaming" {
+		t.Errorf("unexpected content: %s", res.Content)
+	}
+}
+
+func TestClient_Chat_SSEResponseFallback(t *testing.T) {
+	// Simulates an AI provider that ignores stream: false and returns SSE stream chunks (like Ollama / local LLMs)
+	ssePayload := "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"```\"}}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"go\\n\"}}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"package main\\n\"}}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"```\"}}]}\n\n" +
+		"data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"choices\":[],\"usage\":{\"prompt_tokens\":25,\"completion_tokens\":15,\"total_tokens\":40}}\n\n" +
+		"data: [DONE]\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Test both text/event-stream content type and application/json with SSE body
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(ssePayload))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		Model:   "gemma4:31b",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := client.Chat(context.Background(), []ChatMessage{{Role: "user", Content: "write go code"}})
+	if err != nil {
+		t.Fatalf("Chat should succeed on SSE stream response, but got error: %v", err)
+	}
+
+	expectedContent := "```go\npackage main\n```"
+	if res.Content != expectedContent {
+		t.Errorf("expected content %q, got %q", expectedContent, res.Content)
+	}
+	if res.PromptTokens != 25 || res.CompletionTokens != 15 || res.TotalTokens != 40 {
+		t.Errorf("token metrics mismatch: in=%d out=%d tot=%d", res.PromptTokens, res.CompletionTokens, res.TotalTokens)
+	}
+}
+
+func TestClient_GenerateCode_SSEResponseFallback(t *testing.T) {
+	ssePayload := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"```go\\npackage main\\nfunc main() {}\\n```\"}}]}\n\n" +
+		"data: [DONE]\n\n"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json") // Note: application/json header with SSE body
+		_, _ = w.Write([]byte(ssePayload))
+	}))
+	defer server.Close()
+
+	client, err := NewClient(Config{
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+		Model:   "gemma4:31b",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := client.GenerateCode(context.Background())
+	if err != nil {
+		t.Fatalf("GenerateCode failed on SSE response: %v", err)
+	}
+	if !strings.Contains(res.GoCode, "package main") {
+		t.Errorf("GoCode does not contain 'package main': %s", res.GoCode)
+	}
+}
+
+

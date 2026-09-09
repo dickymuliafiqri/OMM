@@ -45,6 +45,8 @@ func main() {
 
 	cbClient := worker.NewCallbackClient(10*time.Second, 1*time.Second)
 	ladderRunner := worker.NewDefaultLadderRunner(swe.NewEvaluator(true))
+	ladderRunner.TaskTimeout = time.Duration(cfg.TaskTimeoutSec) * time.Second
+	ladderRunner.MaxInferenceRetries = 1
 	executor := worker.NewDefaultExecutor(cbClient, ladderRunner, metrics.Default)
 	pool := worker.NewPool(context.Background(), cfg.MaxConcurrentJobs, time.Duration(cfg.JobTimeoutSec)*time.Second, executor, metrics.Default)
 

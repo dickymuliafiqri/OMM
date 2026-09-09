@@ -9,10 +9,15 @@ import (
 type Tier string
 
 const (
-	TierJunior Tier = "JUNIOR" // 20 Pts
-	TierMid    Tier = "MID"    // 25 Pts
-	TierSenior Tier = "SENIOR" // 30 Pts
-	TierStaff  Tier = "STAFF"  // 25 Pts
+	TierLow   Tier = "LOW"   // 20 Pts
+	TierMid   Tier = "MID"   // 25 Pts
+	TierHigh  Tier = "HIGH"  // 30 Pts
+	TierUltra Tier = "ULTRA" // 25 Pts
+
+	// Backward compatibility aliases
+	TierJunior Tier = TierLow
+	TierSenior Tier = TierHigh
+	TierStaff  Tier = TierUltra
 )
 
 // Task defines a single unit of code fixing problem (SWE-bench instance)
@@ -69,16 +74,32 @@ func CalculateGrade(score int) (grade string, title string) {
 	}
 }
 
+// NormalizeTier converts any legacy tier string (JUNIOR, SENIOR, STAFF) into canonical LOW, MID, HIGH, ULTRA.
+func NormalizeTier(t string) string {
+	switch strings.ToUpper(strings.TrimSpace(t)) {
+	case "LOW", "JUNIOR":
+		return "LOW"
+	case "MID":
+		return "MID"
+	case "HIGH", "SENIOR":
+		return "HIGH"
+	case "ULTRA", "STAFF":
+		return "ULTRA"
+	default:
+		return strings.ToUpper(strings.TrimSpace(t))
+	}
+}
+
 // TierOrder returns the numeric order of a tier for comparison
 func TierOrder(t Tier) int {
-	switch strings.ToUpper(string(t)) {
-	case "JUNIOR":
+	switch NormalizeTier(string(t)) {
+	case "LOW":
 		return 1
 	case "MID":
 		return 2
-	case "SENIOR":
+	case "HIGH":
 		return 3
-	case "STAFF":
+	case "ULTRA":
 		return 4
 	default:
 		return 0

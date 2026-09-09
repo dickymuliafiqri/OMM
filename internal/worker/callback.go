@@ -15,10 +15,13 @@ import (
 
 // ProgressPayload represents progress updates during benchmark execution.
 type ProgressPayload struct {
-	Type     string `json:"type"`     // "progress"
-	Phase    string `json:"phase"`
-	Message  string `json:"message"`
-	Progress int    `json:"progress"` // 0-100
+	Type             string `json:"type"`                       // "progress"
+	Phase            string `json:"phase"`
+	Message          string `json:"message"`
+	Progress         int    `json:"progress"`                   // 0-100
+	PromptTokens     int    `json:"promptTokens,omitempty"`
+	CompletionTokens int    `json:"completionTokens,omitempty"`
+	TotalTokens      int    `json:"totalTokens,omitempty"`
 }
 
 // LogPayload represents a single streaming log line sent to omm-web.
@@ -48,6 +51,7 @@ type BenchmarkRun struct {
 	BenchmarkMode    string  `json:"benchmarkMode"`   // "swe"
 	MaxTierAchieved  string  `json:"maxTierAchieved"` // "NONE", "JUNIOR", "MID", "SENIOR", "STAFF"
 	CreatedAt        string  `json:"createdAt"`
+	IsCheckpoint     bool    `json:"isCheckpoint,omitempty"`
 }
 
 // TaskRun represents performance metrics for a single SWE-bench task.
@@ -75,9 +79,11 @@ type ResultPayload struct {
 
 // ErrorPayload notifies omm-web of fatal errors during benchmark execution.
 type ErrorPayload struct {
-	Type    string `json:"type"` // "error"
-	Message string `json:"message"`
-	Phase   string `json:"phase"`
+	Type         string        `json:"type"` // "error"
+	Message      string        `json:"message"`
+	Phase        string        `json:"phase"`
+	BenchmarkRun *BenchmarkRun `json:"benchmarkRun,omitempty"`
+	TaskRuns     []TaskRun     `json:"taskRuns,omitempty"`
 }
 
 // CallbackClient handles transmitting HTTP callbacks to omm-web.
@@ -237,7 +243,17 @@ func (c *CallbackClient) SendResult(ctx context.Context, callbackURL, secret str
 
 	logger.Debug("callback.send_result", "url=%s run_id=%s score=%d/%d status=%s", callbackURL, payload.BenchmarkRun.ID, payload.BenchmarkRun.TotalScore, payload.BenchmarkRun.MaxScore, payload.BenchmarkRun.Status)
 
-	err := c.postWithRetry(ctx, callbackURL, secret, payload)
+	// If ctx has been cancelled or timed out (e.g. job timeout),
+	// use a detached context with a dedicated timeout so that the result/partial
+	// callback can still be delivered reliably to omm-web.
+	sendCtx := ctx
+	if ctx.Err() != nil {
+		var cancel context.CancelFunc
+		sendCtx, cancel = context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+	}
+
+	err := c.postWithRetry(sendCtx, callbackURL, secret, payload)
 	if err != nil {
 		c.getMetrics().CallbackErrors.Add(1)
 		logger.Warn("CALLBACK", "Peringatan: Gagal mengirimkan final result callback ke %s: %v", callbackURL, err)
@@ -253,7 +269,17 @@ func (c *CallbackClient) SendError(ctx context.Context, callbackURL, secret stri
 
 	logger.Debug("callback.send_error", "url=%s phase=%s msg=%s", callbackURL, payload.Phase, payload.Message)
 
-	err := c.postWithRetry(ctx, callbackURL, secret, payload)
+	// If ctx has been cancelled or timed out (e.g. job timeout),
+	// use a detached context with a dedicated timeout so that the error callback
+	// can still be delivered reliably to omm-web.
+	sendCtx := ctx
+	if ctx.Err() != nil {
+		var cancel context.CancelFunc
+		sendCtx, cancel = context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+	}
+
+	err := c.postWithRetry(sendCtx, callbackURL, secret, payload)
 	if err != nil {
 		c.getMetrics().CallbackErrors.Add(1)
 		logger.Warn("CALLBACK", "Peringatan: Gagal mengirimkan error callback ke %s: %v", callbackURL, err)

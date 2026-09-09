@@ -67,7 +67,7 @@ func NewClient(cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("base_url tidak boleh kosong")
 	}
 	if cfg.Timeout <= 0 {
-		cfg.Timeout = 120 * time.Second // Strict default 120s timeout per inference request
+		cfg.Timeout = 180 * time.Second // Default 180s timeout per inference request
 	}
 	if cfg.Temperature <= 0 {
 		cfg.Temperature = 0.2
@@ -92,9 +92,7 @@ func NewClient(cfg Config) (*Client, error) {
 		timeout:         cfg.Timeout,
 		temperature:     cfg.Temperature,
 		reasoningEffort: reasoningEffort,
-		httpClient: &http.Client{
-			Timeout: cfg.Timeout,
-		},
+		httpClient:      &http.Client{},
 	}
 
 	logger.Debug("ai.client_created", "root_url=%s chat_url=%s model=%s timeout=%v temp=%.2f reasoning=%s", rootURL, client.chatURL, cfg.Model, cfg.Timeout, cfg.Temperature, reasoningEffort)
@@ -282,6 +280,7 @@ func (c *Client) TestModel(ctx context.Context, model string) error {
 			{Role: "user", Content: "ping"},
 		},
 		Temperature: 0.1,
+		Stream:      boolPtr(false),
 	}
 
 	bodyBytes, err := json.Marshal(testReq)
@@ -410,10 +409,15 @@ type ReasoningConfig struct {
 	Effort string `json:"effort,omitempty"`
 }
 
+func boolPtr(b bool) *bool {
+	return &b
+}
+
 type chatRequest struct {
 	Model           string           `json:"model"`
 	Messages        []ChatMessage    `json:"messages"`
 	Temperature     float64          `json:"temperature"`
+	Stream          *bool            `json:"stream,omitempty"`
 	ReasoningEffort string           `json:"reasoning_effort,omitempty"`
 	Reasoning       *ReasoningConfig `json:"reasoning,omitempty"`
 }
@@ -458,6 +462,7 @@ func (c *Client) Chat(ctx context.Context, messages []ChatMessage) (*ChatResult,
 		Model:           c.model,
 		Messages:        messages,
 		Temperature:     c.temperature,
+		Stream:          boolPtr(false),
 		ReasoningEffort: c.reasoningEffort,
 		Reasoning: &ReasoningConfig{
 			Effort: c.reasoningEffort,
@@ -470,8 +475,12 @@ func (c *Client) Chat(ctx context.Context, messages []ChatMessage) (*ChatResult,
 		return nil, fmt.Errorf("gagal serialisasi request payload: %w", err)
 	}
 
-	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
-	defer cancel()
+	reqCtx := ctx
+	var cancel context.CancelFunc
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline && c.timeout > 0 {
+		reqCtx, cancel = context.WithTimeout(ctx, c.timeout)
+		defer cancel()
+	}
 
 	logger.Debug("ai.chat_dispatch", "model=%s messages=%d bytes=%d url=%s", c.model, len(messages), len(bodyBytes), c.chatURL)
 
@@ -491,7 +500,7 @@ func (c *Client) Chat(ctx context.Context, messages []ChatMessage) (*ChatResult,
 	turnLatency := time.Since(start)
 	if err != nil {
 		if reqCtx.Err() == context.DeadlineExceeded {
-			return nil, fmt.Errorf("timeout inferensi AI (%v terlampaui): %w", c.timeout, err)
+			return nil, fmt.Errorf("timeout inferensi AI: batas waktu terlampaui: %w", err)
 		}
 		return nil, fmt.Errorf("gagal menghubungi AI provider di %s: %w", c.chatURL, err)
 	}
@@ -514,14 +523,10 @@ func (c *Client) Chat(ctx context.Context, messages []ChatMessage) (*ChatResult,
 		return nil, fmt.Errorf("AI provider mengembalikan halaman web HTML (bukan API JSON). Pastikan Base URL adalah endpoint API valid")
 	}
 
-	var chatResp chatResponse
-	if err := json.Unmarshal(respBody, &chatResp); err != nil {
-		logger.AIRes(c.model, fmt.Sprintf("HTTP %d", resp.StatusCode), turnLatency, 0, 0, 0, "json_parse_err")
-		return nil, fmt.Errorf("gagal parse json response AI (HTTP %d): %w (Body: %s)", resp.StatusCode, err, string(respBody))
-	}
-
 	if resp.StatusCode != http.StatusOK {
 		logger.AIRes(c.model, fmt.Sprintf("HTTP %d", resp.StatusCode), turnLatency, 0, 0, 0, "status_not_ok")
+		var chatResp chatResponse
+		_ = json.Unmarshal(respBody, &chatResp)
 		errMsg := fmt.Sprintf("AI provider mengembalikan status HTTP %d", resp.StatusCode)
 		if chatResp.Error != nil && chatResp.Error.Message != "" {
 			errMsg += fmt.Sprintf(": %s (type: %s)", chatResp.Error.Message, chatResp.Error.Type)
@@ -531,19 +536,48 @@ func (c *Client) Chat(ctx context.Context, messages []ChatMessage) (*ChatResult,
 		return nil, fmt.Errorf("%s", errMsg)
 	}
 
-	if len(chatResp.Choices) == 0 {
-		logger.AIRes(c.model, fmt.Sprintf("HTTP %d", resp.StatusCode), turnLatency, 0, 0, 0, "empty_choices")
-		return nil, fmt.Errorf("respons AI tidak memiliki choices (kosong)")
+	var rawContent string
+	var promptTok, compTok, totTok int
+
+	if isSSEStream(resp.Header.Get("Content-Type"), respBody) {
+		sseRes, sseErr := parseSSEResponse(respBody, messages)
+		if sseErr != nil {
+			logger.AIRes(c.model, fmt.Sprintf("HTTP %d", resp.StatusCode), turnLatency, 0, 0, 0, "sse_parse_err")
+			return nil, fmt.Errorf("gagal parse stream SSE AI (HTTP %d): %w (Body: %s)", resp.StatusCode, sseErr, string(respBody))
+		}
+		rawContent = sseRes.Content
+		promptTok = sseRes.PromptTokens
+		compTok = sseRes.CompletionTokens
+		totTok = sseRes.TotalTokens
+	} else {
+		var chatResp chatResponse
+		if err := json.Unmarshal(respBody, &chatResp); err != nil {
+			if sseRes, sseErr := parseSSEResponse(respBody, messages); sseErr == nil && sseRes != nil && sseRes.Content != "" {
+				rawContent = sseRes.Content
+				promptTok = sseRes.PromptTokens
+				compTok = sseRes.CompletionTokens
+				totTok = sseRes.TotalTokens
+			} else {
+				logger.AIRes(c.model, fmt.Sprintf("HTTP %d", resp.StatusCode), turnLatency, 0, 0, 0, "json_parse_err")
+				return nil, fmt.Errorf("gagal parse json response AI (HTTP %d): %w (Body: %s)", resp.StatusCode, err, string(respBody))
+			}
+		} else {
+			if len(chatResp.Choices) == 0 {
+				logger.AIRes(c.model, fmt.Sprintf("HTTP %d", resp.StatusCode), turnLatency, 0, 0, 0, "empty_choices")
+				return nil, fmt.Errorf("respons AI tidak memiliki choices (kosong)")
+			}
+
+			promptTok = chatResp.Usage.PromptTokens
+			compTok = chatResp.Usage.CompletionTokens
+			totTok = chatResp.Usage.TotalTokens
+			if totTok == 0 && (promptTok > 0 || compTok > 0) {
+				totTok = promptTok + compTok
+			}
+
+			rawContent = chatResp.Choices[0].Message.Content
+		}
 	}
 
-	promptTok := chatResp.Usage.PromptTokens
-	compTok := chatResp.Usage.CompletionTokens
-	totTok := chatResp.Usage.TotalTokens
-	if totTok == 0 && (promptTok > 0 || compTok > 0) {
-		totTok = promptTok + compTok
-	}
-
-	rawContent := chatResp.Choices[0].Message.Content
 	logger.Debug("ai.chat_done", "model=%s latency_ms=%d prompt_tok=%d comp_tok=%d total_tok=%d content_len=%d", c.model, turnLatency.Milliseconds(), promptTok, compTok, totTok, len(rawContent))
 	logger.AIRes(c.model, "HTTP 200 OK", turnLatency, promptTok, compTok, totTok, fmt.Sprintf("content_len=%d", len(rawContent)))
 
@@ -553,6 +587,152 @@ func (c *Client) Chat(ctx context.Context, messages []ChatMessage) (*ChatResult,
 		CompletionTokens: compTok,
 		TotalTokens:      totTok,
 		Duration:         turnLatency,
+	}, nil
+}
+
+// isSSEStream checks whether the response content type or body indicates Server-Sent Events (SSE) stream
+func isSSEStream(contentType string, body []byte) bool {
+	if strings.Contains(strings.ToLower(contentType), "text/event-stream") {
+		return true
+	}
+	trimmed := strings.TrimSpace(string(body))
+	if strings.HasPrefix(trimmed, "data:") || strings.HasPrefix(trimmed, "data :") {
+		return true
+	}
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	for i := 0; i < 10 && scanner.Scan(); i++ {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "data:") || strings.HasPrefix(line, "data :") {
+			return true
+		}
+	}
+	return false
+}
+
+type sseChunkPayload struct {
+	Choices []struct {
+		Index int `json:"index"`
+		Delta struct {
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+			Reasoning        string `json:"reasoning"`
+		} `json:"delta"`
+		Message struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"message"`
+		Text         string `json:"text"`
+		FinishReason any    `json:"finish_reason"`
+	} `json:"choices"`
+	Usage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	} `json:"usage"`
+	Error *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    any    `json:"code"`
+	} `json:"error,omitempty"`
+}
+
+// parseSSEResponse parses an SSE stream buffer (e.g. data: {...}\n\ndata: {...}\n\ndata: [DONE])
+// and aggregates all token deltas, reasoning, and token usage into a ChatResult.
+func parseSSEResponse(body []byte, messages []ChatMessage) (*ChatResult, error) {
+	var fullContent strings.Builder
+	var fullReasoning strings.Builder
+	var promptTok, compTok, totTok int
+
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	buf := make([]byte, 64*1024)
+	scanner.Buffer(buf, 10*1024*1024)
+
+	foundAnyChunk := false
+
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, ":") {
+			continue
+		}
+		if !strings.HasPrefix(line, "data:") && !strings.HasPrefix(line, "data :") {
+			continue
+		}
+
+		data := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(line, "data:"), "data :"))
+		if data == "[DONE]" {
+			break
+		}
+
+		var chunk sseChunkPayload
+		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			continue
+		}
+
+		if chunk.Error != nil && chunk.Error.Message != "" {
+			return nil, fmt.Errorf("error dari AI stream: %s", chunk.Error.Message)
+		}
+
+		if chunk.Usage != nil {
+			if chunk.Usage.PromptTokens > 0 {
+				promptTok = chunk.Usage.PromptTokens
+			}
+			if chunk.Usage.CompletionTokens > 0 {
+				compTok = chunk.Usage.CompletionTokens
+			}
+			if chunk.Usage.TotalTokens > 0 {
+				totTok = chunk.Usage.TotalTokens
+			}
+		}
+
+		for _, choice := range chunk.Choices {
+			contentPiece := choice.Delta.Content
+			if contentPiece == "" {
+				contentPiece = choice.Message.Content
+			}
+			if contentPiece == "" {
+				contentPiece = choice.Text
+			}
+			if contentPiece != "" {
+				fullContent.WriteString(contentPiece)
+				foundAnyChunk = true
+			}
+
+			reasoningPiece := choice.Delta.ReasoningContent
+			if reasoningPiece == "" {
+				reasoningPiece = choice.Delta.Reasoning
+			}
+			if reasoningPiece != "" {
+				fullReasoning.WriteString(reasoningPiece)
+				foundAnyChunk = true
+			}
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("gagal membaca stream SSE: %w", err)
+	}
+
+	rawContent := fullContent.String()
+	if rawContent == "" && fullReasoning.Len() > 0 {
+		rawContent = fullReasoning.String()
+	}
+
+	if !foundAnyChunk && rawContent == "" {
+		return nil, fmt.Errorf("tidak ada chunk SSE valid yang dapat diekstrak dari respons")
+	}
+
+	if totTok == 0 && (promptTok > 0 || compTok > 0) {
+		totTok = promptTok + compTok
+	}
+	if totTok == 0 {
+		promptTok, compTok, totTok = estimateTokens(messages, rawContent)
+	}
+
+	return &ChatResult{
+		Content:          rawContent,
+		PromptTokens:     promptTok,
+		CompletionTokens: compTok,
+		TotalTokens:      totTok,
 	}, nil
 }
 
@@ -878,6 +1058,7 @@ func (c *Client) GenerateCodeWithSelfHealing(
 			Model:           c.model,
 			Messages:        messages,
 			Temperature:     c.temperature,
+			Stream:          boolPtr(false),
 			ReasoningEffort: c.reasoningEffort,
 			Reasoning: &ReasoningConfig{
 				Effort: c.reasoningEffort,
@@ -894,6 +1075,7 @@ func (c *Client) GenerateCodeWithSelfHealing(
 		var respStatusCode int
 		var isHTML bool
 		var turnLatency time.Duration
+		var contentType string
 
 		callErr := func() error {
 			reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
@@ -923,6 +1105,7 @@ func (c *Client) GenerateCodeWithSelfHealing(
 			defer resp.Body.Close()
 
 			respStatusCode = resp.StatusCode
+			contentType = resp.Header.Get("Content-Type")
 
 			b, err := io.ReadAll(resp.Body)
 			if err != nil {
@@ -934,7 +1117,7 @@ func (c *Client) GenerateCodeWithSelfHealing(
 			respBody = b
 
 			trimmedBody := strings.TrimSpace(string(respBody))
-			isHTML = strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") ||
+			isHTML = strings.Contains(strings.ToLower(contentType), "text/html") ||
 				strings.HasPrefix(trimmedBody, "<!") ||
 				strings.HasPrefix(trimmedBody, "<html")
 			return nil
@@ -952,14 +1135,10 @@ func (c *Client) GenerateCodeWithSelfHealing(
 			return nil, fmt.Errorf("AI provider mengembalikan halaman web HTML (bukan API JSON). Pastikan Base URL adalah endpoint API valid")
 		}
 
-		var chatResp chatResponse
-		if err := json.Unmarshal(respBody, &chatResp); err != nil {
-			logger.AIRes(c.model, fmt.Sprintf("HTTP %d", respStatusCode), turnLatency, 0, 0, 0, "json_parse_err")
-			return nil, fmt.Errorf("gagal parse json response AI (HTTP %d): %w (Body: %s)", respStatusCode, err, string(respBody))
-		}
-
 		if respStatusCode != http.StatusOK {
 			logger.AIRes(c.model, fmt.Sprintf("HTTP %d", respStatusCode), turnLatency, 0, 0, 0, "status_not_ok")
+			var chatResp chatResponse
+			_ = json.Unmarshal(respBody, &chatResp)
 			errMsg := fmt.Sprintf("AI provider mengembalikan status HTTP %d", respStatusCode)
 			if chatResp.Error != nil && chatResp.Error.Message != "" {
 				errMsg += fmt.Sprintf(": %s (type: %s)", chatResp.Error.Message, chatResp.Error.Type)
@@ -969,23 +1148,52 @@ func (c *Client) GenerateCodeWithSelfHealing(
 			return nil, fmt.Errorf("%s", errMsg)
 		}
 
-		if len(chatResp.Choices) == 0 {
-			logger.AIRes(c.model, fmt.Sprintf("HTTP %d", respStatusCode), turnLatency, 0, 0, 0, "empty_choices")
-			return nil, fmt.Errorf("respons AI tidak memiliki choices (kosong)")
+		var rawContent string
+		var promptTok, compTok, totTok int
+
+		if isSSEStream(contentType, respBody) {
+			sseRes, sseErr := parseSSEResponse(respBody, messages)
+			if sseErr != nil {
+				logger.AIRes(c.model, fmt.Sprintf("HTTP %d", respStatusCode), turnLatency, 0, 0, 0, "sse_parse_err")
+				return nil, fmt.Errorf("gagal parse stream SSE AI (HTTP %d): %w (Body: %s)", respStatusCode, sseErr, string(respBody))
+			}
+			rawContent = sseRes.Content
+			promptTok = sseRes.PromptTokens
+			compTok = sseRes.CompletionTokens
+			totTok = sseRes.TotalTokens
+		} else {
+			var chatResp chatResponse
+			if err := json.Unmarshal(respBody, &chatResp); err != nil {
+				if sseRes, sseErr := parseSSEResponse(respBody, messages); sseErr == nil && sseRes != nil && sseRes.Content != "" {
+					rawContent = sseRes.Content
+					promptTok = sseRes.PromptTokens
+					compTok = sseRes.CompletionTokens
+					totTok = sseRes.TotalTokens
+				} else {
+					logger.AIRes(c.model, fmt.Sprintf("HTTP %d", respStatusCode), turnLatency, 0, 0, 0, "json_parse_err")
+					return nil, fmt.Errorf("gagal parse json response AI (HTTP %d): %w (Body: %s)", respStatusCode, err, string(respBody))
+				}
+			} else {
+				if len(chatResp.Choices) == 0 {
+					logger.AIRes(c.model, fmt.Sprintf("HTTP %d", respStatusCode), turnLatency, 0, 0, 0, "empty_choices")
+					return nil, fmt.Errorf("respons AI tidak memiliki choices (kosong)")
+				}
+
+				promptTok = chatResp.Usage.PromptTokens
+				compTok = chatResp.Usage.CompletionTokens
+				totTok = chatResp.Usage.TotalTokens
+				if totTok == 0 && (promptTok > 0 || compTok > 0) {
+					totTok = promptTok + compTok
+				}
+
+				rawContent = chatResp.Choices[0].Message.Content
+			}
 		}
 
 		// Accumulate token usage
-		promptTok := chatResp.Usage.PromptTokens
-		compTok := chatResp.Usage.CompletionTokens
-		totTok := chatResp.Usage.TotalTokens
-		if totTok == 0 && (promptTok > 0 || compTok > 0) {
-			totTok = promptTok + compTok
-		}
 		totalPromptTokens += promptTok
 		totalCompletionTokens += compTok
 		totalTokens += totTok
-
-		rawContent := chatResp.Choices[0].Message.Content
 		goCode, err := ExtractGoCode(rawContent)
 		if err != nil {
 			logger.AIRes(c.model, fmt.Sprintf("HTTP %d", respStatusCode), turnLatency, promptTok, compTok, totTok, fmt.Sprintf("extract_err=%v", err))

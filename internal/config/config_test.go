@@ -15,6 +15,7 @@ func clearEnv() {
 		"OMM_ALLOW_LOCALHOST",
 		"OMM_MAX_CONCURRENT_JOBS",
 		"OMM_JOB_TIMEOUT_SEC",
+		"OMM_TASK_TIMEOUT_SEC",
 		"OMM_GLOBAL_RATE_LIMIT",
 		"OMM_PER_SOURCE_RATE_LIMIT",
 		"OMM_LOG_LEVEL",
@@ -52,6 +53,9 @@ func TestLoad_DefaultsApplied(t *testing.T) {
 	if cfg.JobTimeoutSec != DefaultJobTimeoutSec {
 		t.Errorf("expected JobTimeoutSec %d, got %d", DefaultJobTimeoutSec, cfg.JobTimeoutSec)
 	}
+	if cfg.TaskTimeoutSec != DefaultTaskTimeoutSec {
+		t.Errorf("expected TaskTimeoutSec %d, got %d", DefaultTaskTimeoutSec, cfg.TaskTimeoutSec)
+	}
 	if cfg.GlobalRateLimit != DefaultGlobalRateLimit {
 		t.Errorf("expected GlobalRateLimit %d, got %d", DefaultGlobalRateLimit, cfg.GlobalRateLimit)
 	}
@@ -77,6 +81,7 @@ func TestLoad_CustomEnvVariables(t *testing.T) {
 	_ = os.Setenv("OMM_ALLOW_LOCALHOST", "false")
 	_ = os.Setenv("OMM_MAX_CONCURRENT_JOBS", "5")
 	_ = os.Setenv("OMM_JOB_TIMEOUT_SEC", "600")
+	_ = os.Setenv("OMM_TASK_TIMEOUT_SEC", "240")
 	_ = os.Setenv("OMM_GLOBAL_RATE_LIMIT", "50")
 	_ = os.Setenv("OMM_PER_SOURCE_RATE_LIMIT", "10")
 	_ = os.Setenv("OMM_LOG_LEVEL", "DEBUG")
@@ -106,6 +111,9 @@ func TestLoad_CustomEnvVariables(t *testing.T) {
 	if cfg.JobTimeoutSec != 600 {
 		t.Errorf("expected JobTimeoutSec 600, got %d", cfg.JobTimeoutSec)
 	}
+	if cfg.TaskTimeoutSec != 240 {
+		t.Errorf("expected TaskTimeoutSec 240, got %d", cfg.TaskTimeoutSec)
+	}
 	if cfg.GlobalRateLimit != 50 {
 		t.Errorf("expected GlobalRateLimit 50, got %d", cfg.GlobalRateLimit)
 	}
@@ -123,6 +131,7 @@ func TestValidate_InvalidNumbers(t *testing.T) {
 		BenchSecret:        "valid-secret",
 		MaxConcurrentJobs:  3,
 		JobTimeoutSec:      300,
+		TaskTimeoutSec:     180,
 		GlobalRateLimit:    30,
 		PerSourceRateLimit: 5,
 	}
@@ -143,6 +152,13 @@ func TestValidate_InvalidNumbers(t *testing.T) {
 			name: "negative JobTimeoutSec",
 			mutate: func(c *Config) {
 				c.JobTimeoutSec = -1
+			},
+			wantErr: true,
+		},
+		{
+			name: "zero TaskTimeoutSec",
+			mutate: func(c *Config) {
+				c.TaskTimeoutSec = 0
 			},
 			wantErr: true,
 		},

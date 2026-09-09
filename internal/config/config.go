@@ -13,7 +13,8 @@ import (
 const (
 	DefaultListenAddr         = ":8080"
 	DefaultMaxConcurrentJobs  = 3
-	DefaultJobTimeoutSec      = 300
+	DefaultJobTimeoutSec      = 1800
+	DefaultTaskTimeoutSec     = 180
 	DefaultGlobalRateLimit    = 30
 	DefaultPerSourceRateLimit = 5
 	DefaultLogLevel           = "info"
@@ -31,7 +32,8 @@ type Config struct {
 
 	// Worker
 	MaxConcurrentJobs int // Maks evaluasi paralel (default: 3)
-	JobTimeoutSec     int // Timeout per job dalam detik (default: 300)
+	JobTimeoutSec     int // Batas waktu keselamatan global per job dalam detik (default: 1800)
+	TaskTimeoutSec    int // Batas waktu per task evaluasi dalam detik (default: 180)
 
 	// Rate Limiting
 	GlobalRateLimit    int // Maks request per menit global (default: 30)
@@ -53,6 +55,7 @@ func Load() (*Config, error) {
 		AllowLocalhost:     getEnvBool("OMM_ALLOW_LOCALHOST", true),
 		MaxConcurrentJobs:  getEnvInt("OMM_MAX_CONCURRENT_JOBS", DefaultMaxConcurrentJobs),
 		JobTimeoutSec:      getEnvInt("OMM_JOB_TIMEOUT_SEC", DefaultJobTimeoutSec),
+		TaskTimeoutSec:     getEnvInt("OMM_TASK_TIMEOUT_SEC", DefaultTaskTimeoutSec),
 		GlobalRateLimit:    getEnvInt("OMM_GLOBAL_RATE_LIMIT", DefaultGlobalRateLimit),
 		PerSourceRateLimit: getEnvInt("OMM_PER_SOURCE_RATE_LIMIT", DefaultPerSourceRateLimit),
 		LogLevel:           strings.ToLower(getEnv("OMM_LOG_LEVEL", DefaultLogLevel)),
@@ -77,6 +80,10 @@ func (c *Config) Validate() error {
 
 	if c.JobTimeoutSec <= 0 {
 		return fmt.Errorf("konfigurasi tidak valid: OMM_JOB_TIMEOUT_SEC harus > 0 (diberikan: %d)", c.JobTimeoutSec)
+	}
+
+	if c.TaskTimeoutSec <= 0 {
+		return fmt.Errorf("konfigurasi tidak valid: OMM_TASK_TIMEOUT_SEC harus > 0 (diberikan: %d)", c.TaskTimeoutSec)
 	}
 
 	if c.GlobalRateLimit <= 0 {
